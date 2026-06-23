@@ -1,0 +1,8 @@
+venv/
+pycache/*.pyc*.pyo*.pyd
+.env*
+.sqlite3*.db
+.vscode/
+.idea/
+.DS_Store
+.env.example

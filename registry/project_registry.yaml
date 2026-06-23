@@ -1,0 +1,11 @@
+Pulse:
+  path: "~/Desktop/Pulse"
+  lang: "TypeScript"
+  run: "npm run dev"
+  test: "npm test"
+
+Nova:
+  path: "~/Desktop/nova"
+  lang: "Python"
+  run: "python cli.py"
+  test: "pytest"

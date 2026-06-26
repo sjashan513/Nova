@@ -18,6 +18,8 @@ from core.domain.exceptions import (
     ToolNotFoundError,
     PlanContractErrorGroup,
     ExecutionError,
+    StepExecutionError,
+    RetriesExhaustedError,
     DivergenceError,
 )
 
@@ -126,17 +128,51 @@ class TestPlanContractErrorGroup:
         assert group.errors[1].step_id == "s5"
 
 
-class TestReservedFamiliesUntouched:
+class TestExecutionErrorPopulatedInFase2:
     """
-    ExecutionError and DivergenceError are reserved for Fase 3+ and
-    Fase 5 respectively. This session must not have populated them --
-    if it did, that's an out-of-scope change that snuck in.
+    ExecutionError stopped being reserved-and-empty in Fase 2
+    (error_policy.py needed it for real Level-1-retry / Level-3-escalate
+    behavior). This replaces the old "must stay empty" guard with a
+    "must have exactly these subtypes, correctly shaped" guard -- the
+    same spirit (catch unannounced changes) applied to its new state.
     """
 
-    def test_execution_error_is_reserved_and_empty(self):
+    def test_execution_error_is_a_nova_error(self):
         assert issubclass(ExecutionError, NovaError)
-        assert ExecutionError.__doc__ is not None
-        assert "RESERVED" in ExecutionError.__doc__
+
+    def test_step_execution_error_is_an_execution_error(self):
+        assert issubclass(StepExecutionError, ExecutionError)
+
+    def test_retries_exhausted_error_is_an_execution_error(self):
+        assert issubclass(RetriesExhaustedError, ExecutionError)
+
+    def test_step_execution_error_wraps_original_exception(self):
+        original = OSError("file locked")
+        err = StepExecutionError(
+            step_id="s1", attempt=2, original_error=original)
+        assert err.original_error is original
+        assert err.attempt == 2
+        assert err.step_id == "s1"
+
+    def test_retries_exhausted_error_retains_all_attempts(self):
+        attempts = [
+            StepExecutionError(step_id="s1", attempt=1,
+                               original_error=OSError("a")),
+            StepExecutionError(step_id="s1", attempt=2,
+                               original_error=OSError("b")),
+        ]
+        err = RetriesExhaustedError(step_id="s1", attempts=attempts)
+        assert len(err.attempts) == 2
+        assert err.attempts[0] is attempts[0]
+        assert err.attempts[1] is attempts[1]
+
+
+class TestDivergenceErrorStillReserved:
+    """
+    DivergenceError remains reserved for Fase 5. This session must not
+    have populated it -- if it did, that's an out-of-scope change that
+    snuck in.
+    """
 
     def test_divergence_error_is_reserved_and_empty(self):
         assert issubclass(DivergenceError, NovaError)

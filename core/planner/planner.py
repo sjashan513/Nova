@@ -30,8 +30,7 @@ from pydantic import ValidationError
 
 from core.domain.models import Plan
 from core.domain.exceptions import PlannerResponseError, PlannerValidationError
-from registry.tool_registry import TOOLS_BY_NAME
-from registry.worker_registry import WORKERS_BY_NAME
+from core.planner.planner_prompt import build_system_prompt
 
 # --- One-line config point. Confirm the exact model string against your
 # NIM dashboard before relying on this in production -- a wrong string
@@ -40,80 +39,6 @@ NIM_MODEL = "moonshotai/kimi-k2.6"
 NIM_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions"
 NIM_API_KEY_ENV_VAR = "NIM_API_KEY"
 REQUEST_TIMEOUT_SECONDS = 60
-
-_PROJECT_REGISTRY_PATH = "registry/project_registry.yaml"
-
-
-def _build_registry_context() -> str:
-    """
-    Serializes the full Tool + Worker catalogs into a plain-text block
-    for the system prompt. Kimi reads this to know what Nova can do and
-    to pick exact, valid names for Step.tool_or_worker -- this is what
-    makes validate_plan_against_registry's job possible in the first
-    place: Kimi is never guessing a name nobody gave it.
-    """
-    lines: List[str] = ["AVAILABLE TOOLS (primitive, no LLM):"]
-    for name, entry in TOOLS_BY_NAME.items():
-        lines.append(f"  - {name}: {entry.get('description', '')}")
-
-    lines.append("")
-    lines.append("AVAILABLE WORKERS (LLM-powered, one job each):")
-    for name, entry in WORKERS_BY_NAME.items():
-        lines.append(f"  - {name}: {entry.get('description', '')}")
-
-    return "\n".join(lines)
-
-
-def _build_project_context() -> str:
-    """Loads project_registry.yaml verbatim as text context."""
-    import yaml
-
-    with open(_PROJECT_REGISTRY_PATH, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-
-    lines = ["KNOWN PROJECTS:"]
-    for project_name, info in data.items():
-        lines.append(
-            f"  - {project_name}: path={info.get('path')}, "
-            f"lang={info.get('lang')}, run={info.get('run')}, test={info.get('test')}"
-        )
-    return "\n".join(lines)
-
-
-_SYSTEM_PROMPT_TEMPLATE = """You are Nova's Planner. You convert a natural language task into a \
-structured execution plan, or ask clarifying questions if the task is \
-ambiguous.
-
-{registry_context}
-
-{project_context}
-
-RESPONSE CONTRACT — you must respond with ONLY valid JSON, no prose \
-before or after, no markdown code fences. Your response must be exactly \
-one of these two shapes:
-
-If the task is ambiguous and you need more information before planning:
-{{"status": "clarification_needed", "questions": ["...", "..."], "plan": null}}
-
-If you can plan the task as given:
-{{"status": "ready", "questions": [], "plan": {{"objective": "...", "steps": [{{"id": "...", "description": "...", "tool_or_worker": "...", "assumes": ["..."]}}]}}}}
-
-Rules:
-- "tool_or_worker" must be EXACTLY one of the names listed above. Never \
-invent a name.
-- Worker names always start with "worker_". Tool names never do.
-- "assumes" lists the concrete assumptions this step depends on (e.g. \
-which file, which branch) -- this is required for every step, even if \
-the list is empty.
-- Ask at most 3 questions if clarification is needed.
-"""
-
-
-def _build_system_prompt() -> str:
-    return _SYSTEM_PROMPT_TEMPLATE.format(
-        registry_context=_build_registry_context(),
-        project_context=_build_project_context(),
-    )
 
 
 def _strip_markdown_fences(text: str) -> str:
@@ -161,11 +86,10 @@ def call(task: str, retry_context: Optional[str] = None) -> Dict[str, Any]:
     payload = {
         "model": NIM_MODEL,
         "messages": [
-            {"role": "system", "content": _build_system_prompt()},
+            {"role": "system", "content": build_system_prompt()},
             {"role": "user", "content": user_content},
         ],
         "temperature": 0.2,
-        "top_p": 0.95
     }
 
     try:

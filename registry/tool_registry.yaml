@@ -17,43 +17,56 @@ workers:
     - name: "worker_ts_check"
       description: "Runs tsc and returns structured compiler output. No LLM."
       module: "workers.coding.worker_ts_check"
+      requires_model: false
     - name: "worker_ts_fix"
       description: "Fixes TypeScript errors with minimal changes only."
       module: "workers.coding.worker_ts_fix"
+      requires_model: true
     - name: "worker_jsdoc"
       description: "Adds JSDoc to exported symbols. Never touches logic."
       module: "workers.coding.worker_jsdoc"
+      requires_model: true
     - name: "worker_commit_msg"
       description: "Generates conventional commit messages from a diff."
       module: "workers.coding.worker_commit_msg"
+      requires_model: true
     - name: "worker_diff_summary"
       description: "Plain language summary of a diff."
       module: "workers.coding.worker_diff_summary"
+      requires_model: true
     - name: "worker_code_review"
       description: "Structured code review issues by severity."
       module: "workers.coding.worker_code_review"
+      requires_model: true
     - name: "worker_refactor"
       description: "Applies one refactor pattern per call."
       module: "workers.coding.worker_refactor"
+      requires_model: true
     - name: "worker_test_writer"
       description: "Language-agnostic test generation."
       module: "workers.coding.worker_test_writer"
+      requires_model: true
     - name: "worker_test_runner"
       description: "Runs tests and returns structured results. No LLM."
       module: "workers.coding.worker_test_runner"
+      requires_model: false
     - name: "worker_build"
       description: "Runs the build and returns structured output. No LLM."
       module: "workers.coding.worker_build"
+      requires_model: false
     - name: "worker_dependency_check"
       description: "Checks for outdated or vulnerable dependencies. No LLM."
       module: "workers.coding.worker_dependency_check"
+      requires_model: false
 
     # --- QA domain ---
     - name: "worker_qa_consolidate"
       description: "Merges multiple proposed versions of the same file into one."
       module: "workers.qa.worker_qa_consolidate"
+      requires_model: true
 
     # --- ENVIRONMENT domain ---
     - name: "worker_env_snapshot"
       description: "Fetches VSCode editor state via the local HTTP extension. No LLM."
       module: "workers.environment.worker_env_snapshot"
+      requires_model: false

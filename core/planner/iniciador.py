@@ -19,15 +19,21 @@ Two distinct, NOT merged, retry concerns live in this module:
 
 Sealed design decisions this module implements (see the ADR for the
 full rationale, not repeated here):
-  - validate_plan_against_registry returns a LIST of errors (T2) so a
-    single retry round-trip can address every real problem in the plan
-    at once, instead of spending one attempt per error discovered.
+  - validate_plan_contract (core/planner/validators.py) returns a LIST
+    of errors so a single retry round-trip can address every real
+    problem in the plan at once, instead of spending one attempt per
+    error discovered. As of Fase 3 this is an orchestrator over
+    multiple individual checks (registry existence, worker model
+    completeness) -- see NOVA_WORKER_LAYER_ADR.md / session notes;
+    this module only ever calls the one orchestrator function, it
+    does not know or care how many checks live behind it.
   - PlannerError and PlanContractError SHARE one retry counter
     (explicit v1 simplification -- see ADR §7, open debt #1).
   - Retry context is built from the concrete attributes of whichever
-    errors actually fired (available_workers / available_tools) --
-    Option A from the design session: one call to Kimi carrying full
-    context, never split into per-error-type "personality" calls.
+    errors actually fired (available_workers / available_tools /
+    the worker name for a missing model) -- Option A from the design
+    session: one call to Kimi carrying full context, never split into
+    per-error-type "personality" calls.
   - On exhaustion with unresolved PlanContractErrors, raises
     PlanContractErrorGroup -- never silently drops any of them.
 """
@@ -40,9 +46,10 @@ from core.domain.exceptions import (
     PlanContractErrorGroup,
     WorkerNotFoundError,
     ToolNotFoundError,
+    MissingModelError,
 )
 from core.planner import planner
-from core.planner.validators import validate_plan_against_registry
+from core.planner.validators import validate_plan_contract
 
 MAX_CONTRACT_RETRIES = 2
 
@@ -51,13 +58,14 @@ def _build_retry_context(errors: List[PlanContractError]) -> str:
     """
     Turns a list of PlanContractErrors into a single plain-text block
     Kimi can act on. Each error contributes its own specific detail
-    (available_workers / available_tools) -- this is what Option A
-    means in practice: no separate "personality" calls per error type,
-    just one message carrying everything that's wrong.
+    (available_workers / available_tools / the worker name needing a
+    model) -- this is what Option A means in practice: no separate
+    "personality" calls per error type, just one message carrying
+    everything that's wrong.
     """
     lines = [
-        "Your previous plan referenced names that do not exist in the "
-        "registry. Fix ALL of the following in your next response:"
+        "Your previous plan had one or more contract problems. Fix ALL "
+        "of the following in your next response:"
     ]
     for err in errors:
         if isinstance(err, WorkerNotFoundError):
@@ -72,11 +80,18 @@ def _build_retry_context(errors: List[PlanContractError]) -> str:
                 f"registered tool. Valid tools: "
                 f"{', '.join(err.available_tools)}"
             )
+        elif isinstance(err, MissingModelError):
+            lines.append(
+                f"  - Step '{err.step_id}': worker '{err.raw_value}' "
+                f"requires a model -- set \"model\" to a valid model "
+                f"string for this step."
+            )
         else:
-            # Defensive fallback -- should not happen with today's two
-            # subtypes, but if a future PlanContractError subtype is
-            # added without one of these attributes, fail loud in the
-            # prompt rather than silently producing a useless message.
+            # Defensive fallback -- should not happen with today's
+            # known subtypes, but if a future PlanContractError subtype
+            # is added without one of these explicit branches, fail
+            # loud in the prompt rather than silently producing a
+            # useless message.
             lines.append(f"  - Step '{err.step_id}': {err}")
 
     return "\n".join(lines)
@@ -115,7 +130,9 @@ class Iniciador:
 
         Raises:
             PlanContractErrorGroup: contract retries exhausted with one
-                or more unresolved PlanContractErrors.
+                or more unresolved PlanContractErrors (any subtype --
+                registry mismatch, missing model, or future checks
+                added to validate_plan_contract).
             PlannerError: a PlannerError (or subtype) fired on the final
                 allowed attempt and was not recovered from. Propagated
                 as-is -- it is not wrapped into PlanContractErrorGroup,
@@ -146,7 +163,7 @@ class Iniciador:
 
             # status == "ready"
             attempts += 1
-            errors = validate_plan_against_registry(response["plan"])
+            errors = validate_plan_contract(response["plan"])
 
             if not errors:
                 return response

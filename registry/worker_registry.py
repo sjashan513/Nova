@@ -24,8 +24,9 @@ def _load_section(section: str) -> List[Dict]:
 
 _WORKERS = _load_section("workers")
 
-# name -> full entry (description, module). The Iniciador will use this
-# to inject the full worker catalog into Kimi's planning context.
+# name -> full entry (description, module, requires_model). The
+# Iniciador will use this to inject the full worker catalog into
+# Kimi's planning context.
 WORKERS_BY_NAME: Dict[str, Dict] = {entry["name"]: entry for entry in _WORKERS}
 
 
@@ -36,3 +37,26 @@ def list_worker_names() -> List[str]:
 
 def worker_exists(name: str) -> bool:
     return name in WORKERS_BY_NAME
+
+
+def worker_requires_model(name: str) -> bool:
+    """
+    Fase 3 addition. True if the named worker is LLM-powered and
+    therefore needs Step.model set when planned (registry entry has
+    requires_model: true) -- see core/planner/validators.py::
+    validate_worker_steps_have_model.
+
+    Returns False for both: workers explicitly marked
+    requires_model: false (e.g. worker_ts_check -- "No LLM"), and
+    unknown worker names. The latter is deliberately permissive here
+    -- flagging an unknown worker name is validate_plan_against_
+    registry's job (WorkerNotFoundError), not this function's;
+    returning False just means validate_worker_steps_have_model stays
+    silent on it and lets that other check report the real problem,
+    instead of producing a second, more confusing error for the same
+    root cause.
+    """
+    entry = WORKERS_BY_NAME.get(name)
+    if entry is None:
+        return False
+    return bool(entry.get("requires_model", False))

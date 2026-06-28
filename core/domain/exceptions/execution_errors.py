@@ -1,21 +1,24 @@
+"""
+ExecutionError family — Fase 2, extended Fase 3. Owned by
+core/director/error_policy.py, NOT by the Iniciador (contrast with
+PlannerError/PlanContractError, which the Iniciador owns exclusively).
 
-from .nova_error import NovaError
+Populates the error-policy Level 1 (automatic retry, transient) and
+the minimal SHAPE of Level 3 (escalate, retries exhausted) from
+NOVA_DIRECTOR_LAYER_ADR.md §4.3. Level 2 (model fallback) is a Fase 3
+addition (see NOVA_WORKER_LAYER_ADR.md §2.5) -- it lives in
+core/director/error_policy.py as its own function, not as a new
+exception subtype here, since a fallback attempt that itself fails
+still raises the same RetriesExhaustedError as any other exhausted
+step.
+
+Fase 3 addition: WorkerExecutionError. See its own docstring below for
+why it is a sibling of RetriesExhaustedError, not of StepExecutionError.
+"""
+
 from typing import List, Optional
 
-
-# ---------------------------------------------------------------------------
-# ExecutionError family — Fase 2. Owned by core/director/error_policy.py,
-# NOT by the Iniciador (contrast with PlannerError/PlanContractError,
-# which the Iniciador owns exclusively).
-#
-# Populates the error-policy Level 1 (automatic retry, transient) and
-# the minimal SHAPE of Level 3 (escalate, retries exhausted) from
-# NOVA_DIRECTOR_LAYER_ADR.md §4.3. Level 2 (model fallback) is NOT
-# implemented here -- it only makes sense for LLM-powered Worker steps,
-# which do not exist yet in Fase 2 (filesystem/terminal tools only, no
-# LLM calls). Fase 3 EXTENDS this family with a Level-2 case; it does
-# not replace what Fase 2 builds.
-# ---------------------------------------------------------------------------
+from core.domain.exceptions.nova_error import NovaError
 
 
 class ExecutionError(NovaError):
@@ -58,6 +61,51 @@ class StepExecutionError(ExecutionError):
         super().__init__(message, step_id=step_id)
 
 
+class WorkerExecutionError(ExecutionError):
+    """
+    Fase 3. Raised by workers/base.py::BaseWorker.run() when a
+    Worker's own execute() returns status: "error" -- meaning the
+    Worker exhausted ITS OWN internal error policy (its own
+    "ecosystem", per NOVA_PRIMITIVES_ADR.md §3.5: every Worker may be
+    arbitrarily complex inside, with whatever retry/fallback logic
+    makes sense for its specific job) and could not produce a result.
+
+    Deliberately NOT raised per-attempt the way StepExecutionError is
+    -- this is not "one attempt failed, here's attempt N of M". By the
+    time this fires, the Worker has already decided, on its own terms,
+    that nothing more can be done. That is why this is a sibling of
+    RetriesExhaustedError (the OUTCOME of a budget being spent),
+    rather than of StepExecutionError (ONE step in spending that
+    budget): semantically, a WorkerExecutionError IS already an
+    exhausted-budget event, just one whose budget was spent inside the
+    Worker instead of inside core/director/error_policy.py's own loop.
+
+    This is exactly why error_policy.py's execute_with_retry has a
+    dedicated except clause for this type, checked BEFORE the generic
+    except Exception: retrying the same model on a problem the Worker
+    itself already gave up on would spend real NIM calls attacking a
+    cause retrying never changes. What it does NOT skip is Level 2
+    (model fallback, a separate function layered on top of
+    execute_with_retry) -- a different model is a genuinely different
+    condition, not "the same thing again," so it still gets its own
+    chance.
+
+    Carries only `reason` -- a human-readable string explaining what
+    the Worker could not resolve. If the Worker's own execute() caught
+    a real exception internally (e.g. a network error during its own
+    retry loop), that exception is serialized into this same string by
+    the Worker before returning status: "error" -- there is no second,
+    separate field for "the underlying exception object", by design
+    (same principle StepExecutionError already follows: wrap the real
+    cause into a message, don't invent a parallel shape for it).
+    """
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        message = f"Worker exhausted its own error policy: {reason}"
+        super().__init__(message, step_id=None)
+
+
 class RetriesExhaustedError(ExecutionError):
     """
     Level 1 (automatic retry) ran out of attempts without the step
@@ -71,7 +119,11 @@ class RetriesExhaustedError(ExecutionError):
 
     Carries every StepExecutionError from every attempt, not just the
     last one -- same "never silently drop an error" principle as
-    PlanContractErrorGroup (Fase 0/1).
+    PlanContractErrorGroup (Fase 0/1). Fase 3 note: when this is raised
+    because of a WorkerExecutionError short-circuit (see
+    error_policy.py), `attempts` contains exactly one StepExecutionError
+    wrapping that WorkerExecutionError -- not a full max_retries-sized
+    list, since no backoff/retry budget was actually spent.
     """
 
     def __init__(

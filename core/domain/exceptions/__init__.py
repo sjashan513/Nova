@@ -114,6 +114,7 @@ from .execution_errors import (
     ExecutionError,
     StepExecutionError,
     RetriesExhaustedError,
+    WorkerExecutionError,
 )
 
 from .divergence_errors import DivergenceError
@@ -133,6 +134,7 @@ __all__ = [
     "PlanContractErrorGroup",
     "ExecutionError",
     "StepExecutionError",
+    "WorkerExecutionError",
     "RetriesExhaustedError",
     "DivergenceError",
 ]

@@ -24,6 +24,10 @@ from workers.base import BaseWorker, WorkerOutput
 
 _DEFAULT_TEMPERATURE = 0.2
 
+# Timeout raised for safety, same reasoning as worker_commit_msg --
+# but NOT max_tokens: a few sentences of summary, not a full file.
+_DEFAULT_TIMEOUT_SECONDS = 120
+
 _SYSTEM_PROMPT = """You are a code-change summarization assistant. You receive a git \
 diff. Your job is to write a short, plain-language summary (2-5 \
 sentences) explaining what changed and why it likely matters, for a \
@@ -90,6 +94,7 @@ class WorkerDiffSummary(BaseWorker):
             }
 
         temperature: float = input.get("temperature", _DEFAULT_TEMPERATURE)
+        timeout: float = input.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
 
         try:
             raw = call_nim(
@@ -97,6 +102,7 @@ class WorkerDiffSummary(BaseWorker):
                 system_prompt=_SYSTEM_PROMPT,
                 user_content=_build_user_content(diff),
                 temperature=temperature,
+                timeout=timeout,
             )
         except (RuntimeError, requests.exceptions.RequestException, KeyError, IndexError) as e:
             return {

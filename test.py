@@ -1,98 +1,139 @@
 """
-Fase 2: Director writing a real file to the CURRENT working directory,
-via a hand-written Plan -- no Kimi, no mocks. This is the first time
-filesystem.write runs INSIDE a full Director.run() pipeline (T5 tested
-write() in isolation; T8 and the stress test only ever read).
+T9 closure test -- forces a REAL failure through the REAL Director
+pipeline (DirectorInstance, not a direct Worker call like
+run_real_worker_test.py / run_t10_closure_test.py) to confirm Level 1
+and Level 2 of the error policy actually absorb it, instead of it
+propagating as a raw crash the way the timeout did in the T10 run
+before the timeout fix (that one never went through the Director at
+all -- this one does, on purpose).
 
-Uses os.getcwd() genuinely -- wherever you run this script FROM is
-where the file gets written. Run it from your repo root (or anywhere
-else) to see it write there for real:
+Mechanism: a single-Step Plan, built by hand (same pattern as Fase 2's
+own closure script -- a hand-written Plan, not going through Kimi,
+since this tests the EXECUTION layer specifically, not planning).
+The Step's `model` is a deliberately invalid string -- NIM should
+reject it with a real API error. The Step's `fallback_model` is
+minimax-m3, the model already confirmed working in T10. Expected
+chain, mechanically:
 
-    python test_fase2_write.py
+    1. _execute_step routes through execute_with_fallback (step.model
+       is set).
+    2. First attempt: fn_factory(invalid_model) -> WorkerTsFix.run()
+       -> execute() calls call_nim(model=invalid_model, ...) -> NIM
+       rejects it -> a known exception type fires (HTTPError via
+       raise_for_status, or KeyError/IndexError if the response body
+       is malformed instead of a clean 4xx) -> execute() returns
+       status: "error" -> BaseWorker.run() raises WorkerExecutionError.
+    3. error_policy.py's execute_with_retry catches WorkerExecutionError
+       specifically (before the generic except) -- ONE StepExecutionError,
+       immediate RetriesExhaustedError, NO backoff spent retrying a
+       model that will never exist.
+    4. execute_with_fallback catches that RetriesExhaustedError,
+       sees fallback_model is set, retries with fn_factory(fallback_model)
+       -- a full, fresh Level 1 budget with the REAL model.
+    5. This second attempt succeeds for real (same call that already
+       worked in T10) -- the Plan completes DONE, the bad primary
+       model never surfaces as a user-facing failure.
+
+Run from the repo root:
+
+    python run_t9_closure_test.py
+
+Same requirements as the other Nivel 3 scripts (NIM_API_KEY,
+PulseSandbox project entry, npm install in the fixture).
 """
 
-import os
+import time
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 from core.domain.models import Plan, Step
+from core.domain.exceptions import RetriesExhaustedError, PlanContractErrorGroup
 from core.director.director_instance import DirectorInstance
+from workers.coding.worker_ts_check import WorkerTsCheck
 
-OUTPUT_FILENAME = "nova_hello_world.txt"
+PROJECT = "PulseSandbox"
+REAL_MODEL = "minimaxai/minimax-m3"
+FAKE_MODEL = "definitely-not-a-real-model/fake-v0"
+SIGNAL_TS_PATH = "test_fixtures/pulse_sandbox/signal.ts"
 
 
-def make_plan(target_path: str) -> Plan:
-    return Plan(
-        objective="Write a hello world file to the current directory",
+def main() -> None:
+    print("=== Step 0: get real, current errors from signal.ts (real tsc) ===")
+    check_output = WorkerTsCheck().run({"project": PROJECT})
+    print(check_output)
+
+    errors = check_output["errors"]
+    if not errors:
+        print(
+            "\nNo errors found -- signal.ts needs its deliberate type "
+            "error back before this test means anything (T10's run "
+            "only wrote signal.fixed.ts, .documented.ts, .test.ts -- "
+            "it should not have touched signal.ts itself)."
+        )
+        return
+
+    with open(SIGNAL_TS_PATH, "r", encoding="utf-8") as f:
+        file_content = f.read()
+
+    plan = Plan(
+        objective=(
+            "T9 closure test: deliberately invalid primary model, "
+            "real fallback_model -- confirms Level 1 short-circuits "
+            "on WorkerExecutionError and Level 2 recovers for real."
+        ),
         steps=[
             Step(
                 id="s1",
-                description="Write hello world to the current directory",
-                tool_or_worker="filesystem",
-                action="write",
+                description="Fix the real type error in signal.ts.",
+                tool_or_worker="worker_ts_fix",
+                action="",
+                depends_on=[],
                 input={
-                    "path": target_path,
-                    "content": "Hello, world -- written by Nova's Director.\n",
+                    "project": PROJECT,
+                    "file_content": file_content,
+                    "errors": errors,
                 },
-            ),
-            Step(
-                id="s2",
-                description="Read it back to confirm what was actually written",
-                tool_or_worker="filesystem",
-                action="read",
-                depends_on=["s1"],
-                # References s1's OWN reported path, not a hardcoded
-                # string -- proves the Director is reading back exactly
-                # what it itself just wrote, via real $step_id.field
-                # resolution, not a coincidentally-matching literal.
-                input={"path": "$s1.path"},
-            ),
-            Step(
-                id="s3",
-                description="List the current directory to show the file is really there",
-                tool_or_worker="filesystem",
-                action="list",
-                depends_on=["s1"],
-                input={"path": "."},
-            ),
+                assumes=[],
+                model=FAKE_MODEL,
+                fallback_model=REAL_MODEL,
+            )
         ],
     )
 
-
-def main():
-    cwd = os.getcwd()
-    target_path = os.path.join(cwd, OUTPUT_FILENAME)
-
-    print(f"Current directory: {cwd}")
-    print(f"Target file:        {target_path}")
-    print()
-
-    plan = make_plan(target_path)
-    director = DirectorInstance(plan, plan_id="write-hello-world")
-    result = director.run()
-
-    assert director.status == "DONE"
-
-    write_result = result["context"]["s1"]
-    read_result = result["context"]["s2"]
-    list_result = result["context"]["s3"]
-
-    print(f"s1 (write) -> path: {write_result['path']!r}, "
-          f"bytes_written: {write_result['bytes_written']}")
     print(
-        f"s2 (read back, via \"$s1.path\") -> content: {read_result['content']!r}")
-    print(f"s3 (list cwd) -> {OUTPUT_FILENAME!r} in entries: "
-          f"{OUTPUT_FILENAME in list_result['entries']}")
+        f"\n=== Running through DirectorInstance: model='{FAKE_MODEL}' "
+        f"(expected to fail), fallback_model='{REAL_MODEL}' ==="
+    )
 
-    assert read_result["content"] == "Hello, world -- written by Nova's Director.\n"
-    assert OUTPUT_FILENAME in list_result["entries"]
-    assert os.path.exists(target_path)
+    director = DirectorInstance(plan)
+    start = time.monotonic()
 
-    print()
-    print(f"CONFIRMED: real file written to {target_path}, read back through")
-    print("           real $step_id.field resolution (not a hardcoded path),")
-    print("           and confirmed present via a real directory listing.")
-    print()
-    print(f"You can inspect it yourself: cat {target_path}")
-    print(f"(or delete it: rm {target_path})")
+    try:
+        summary = director.run()
+    except (RetriesExhaustedError, PlanContractErrorGroup) as e:
+        elapsed = time.monotonic() - start
+        print(
+            f"\n*** Plan FAILED after {elapsed:.1f}s -- Level 2 did NOT "
+            f"recover. This means either fallback_model itself also "
+            f"failed, or something in the chain is broken. ***"
+        )
+        print(f"Director status: {director.status}")
+        print(f"Error: {type(e).__name__}: {e}")
+        if isinstance(e, RetriesExhaustedError):
+            for attempt in e.attempts:
+                print(f"  attempt {attempt.attempt}: {attempt.original_error}")
+        return
+
+    elapsed = time.monotonic() - start
+    print(
+        f"\n=== Plan DONE in {elapsed:.1f}s -- Level 2 fallback recovered. ===")
+    print(f"Director status: {director.status}")
+    print(f"Step 's1' result: {summary['context']['s1']}")
 
 
 if __name__ == "__main__":

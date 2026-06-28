@@ -24,6 +24,12 @@ from workers.base import BaseWorker, WorkerOutput
 
 _DEFAULT_TEMPERATURE = 0.2
 
+# Timeout raised for safety, same NIM latency observed across every
+# other LLM worker this session -- but NOT max_tokens: a commit
+# message is one short line, not a full file, no reason to ask for
+# 16k tokens of room it will never use.
+_DEFAULT_TIMEOUT_SECONDS = 120
+
 _SYSTEM_PROMPT = """You are a commit message assistant. You receive a git diff. Your job \
 is to write a single conventional-commit-style message summarizing \
 the change: "<type>(<scope>): <short description>", where <type> is \
@@ -92,6 +98,7 @@ class WorkerCommitMsg(BaseWorker):
             }
 
         temperature: float = input.get("temperature", _DEFAULT_TEMPERATURE)
+        timeout: float = input.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
 
         try:
             raw = call_nim(
@@ -99,6 +106,7 @@ class WorkerCommitMsg(BaseWorker):
                 system_prompt=_SYSTEM_PROMPT,
                 user_content=_build_user_content(diff),
                 temperature=temperature,
+                timeout=timeout,
             )
         except (RuntimeError, requests.exceptions.RequestException, KeyError, IndexError) as e:
             return {

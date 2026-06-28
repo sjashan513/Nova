@@ -32,6 +32,16 @@ from workers.base import BaseWorker, WorkerOutput
 
 _DEFAULT_TEMPERATURE = 0.2
 
+# Both higher than call_nim's own defaults (timeout=60, max_tokens=8192).
+# Writing a full test file is a longer generation than fixing one line
+# or adding a JSDoc block -- the SAME call_nim, same payload shape,
+# just genuinely needs more time and more room for this specific
+# Worker's task. This is exactly what call_nim's timeout/max_tokens
+# parameters exist for: each Worker tunes its own defaults, call_nim
+# itself stays ignorant of why.
+_DEFAULT_TIMEOUT_SECONDS = 180
+_DEFAULT_MAX_TOKENS = 16384
+
 _SYSTEM_PROMPT = """You are a test-writing assistant. You receive a file's full content \
 and the language it is written in. Your job is to write a \
 comprehensive set of unit tests covering the file's exported \
@@ -99,6 +109,8 @@ class WorkerTestWriter(BaseWorker):
         language = get_project(project_name).get(
             "lang", "the project's language")
         temperature: float = input.get("temperature", _DEFAULT_TEMPERATURE)
+        timeout: float = input.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
+        max_tokens: int = input.get("max_tokens", _DEFAULT_MAX_TOKENS)
 
         try:
             raw = call_nim(
@@ -106,6 +118,8 @@ class WorkerTestWriter(BaseWorker):
                 system_prompt=_SYSTEM_PROMPT,
                 user_content=_build_user_content(file_content, language),
                 temperature=temperature,
+                timeout=timeout,
+                max_tokens=max_tokens,
             )
         except (RuntimeError, requests.exceptions.RequestException, KeyError, IndexError) as e:
             return {

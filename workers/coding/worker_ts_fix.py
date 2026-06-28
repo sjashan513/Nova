@@ -33,6 +33,13 @@ from workers.base import BaseWorker, WorkerOutput
 
 _DEFAULT_TEMPERATURE = 0.1
 
+# Same real failure observed with worker_jsdoc/worker_test_writer: a
+# larger file means more generation time, regardless of which Worker
+# is doing the generating -- this Worker also returns the COMPLETE
+# file content, same shape of risk.
+_DEFAULT_TIMEOUT_SECONDS = 180
+_DEFAULT_MAX_TOKENS = 16384
+
 _SYSTEM_PROMPT = """You are a TypeScript error-fixing assistant. You receive a file's \
 full content and a list of specific compiler errors. Your job is to \
 fix ONLY those errors, with the smallest possible change to make each \
@@ -137,6 +144,8 @@ class WorkerTsFix(BaseWorker):
             }
 
         temperature: float = input.get("temperature", _DEFAULT_TEMPERATURE)
+        timeout: float = input.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
+        max_tokens: int = input.get("max_tokens", _DEFAULT_MAX_TOKENS)
 
         try:
             raw = call_nim(
@@ -144,6 +153,8 @@ class WorkerTsFix(BaseWorker):
                 system_prompt=_SYSTEM_PROMPT,
                 user_content=_build_user_content(file_content, errors),
                 temperature=temperature,
+                timeout=timeout,
+                max_tokens=max_tokens,
             )
         except (RuntimeError, requests.exceptions.RequestException, KeyError, IndexError) as e:
             # Known failure modes call_nim itself documents (missing

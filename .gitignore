@@ -10,3 +10,5 @@ __pycache__/*
 .idea/
 .DS_Store
 .env.example
+test_fixtures/*
+commits/*

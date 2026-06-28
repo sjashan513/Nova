@@ -9,3 +9,10 @@ Nova:
   lang: "Python"
   run: "python cli.py"
   test: "pytest"
+
+
+PulseSandbox:
+  path: "~/Desktop/nova/test_fixtures/pulse_sandbox"
+  lang: "TypeScript"
+  run: ""
+  test: ""

@@ -68,6 +68,12 @@ from core.director.dag import validate_dag, validate_input_references, build_lev
 from core.director.context import resolve_step_input
 from core.director.error_policy import execute_with_retry, execute_with_fallback
 from tools import filesystem, terminal
+from workers.coding.worker_ts_check import WorkerTsCheck
+from workers.coding.worker_ts_fix import WorkerTsFix
+from workers.coding.worker_jsdoc import WorkerJsdoc
+from workers.coding.worker_test_writer import WorkerTestWriter
+from workers.coding.worker_commit_msg import WorkerCommitMsg
+from workers.coding.worker_diff_summary import WorkerDiffSummary
 
 PlanStatus = Literal["PENDING", "RUNNING", "DONE", "FAILED"]
 
@@ -88,12 +94,32 @@ _WORKER_PREFIX = "worker_"
 # filesystem.write from filesystem.list. Worker entries use "" as their
 # action (a worker_ts_fix step IS the action -- see Step.action's
 # docstring) -- e.g. ("worker_ts_fix", "") maps to that worker's
-# BaseWorker.run, once Fase 3's workers/ package exists.
+# BaseWorker.run.
+#
+# Fase 3: the 6 coding workers built this session are registered here
+# AND in core/planner/planner_prompt.py's IMPLEMENTED_TOOLS_AND_WORKERS
+# -- same commit, per NOVA_PENDIENTE_POST_FASE2.md §3.5: these two
+# lists must never drift out of sync, since a mismatch produces a
+# confusing runtime error instead of Kimi simply not proposing
+# something that has no real dispatch behind it yet.
+#
+# Each entry is `.run` (BaseWorker's concrete wrapper), never
+# `.execute` directly -- `.run` is what enforces the WorkerOutput
+# contract and performs the status -> exception translation
+# (workers/base.py). Dispatching to `.execute` would skip that
+# entirely and leak a raw WorkerOutput dict (or worse, an unhandled
+# status: "error" case) straight into _execute_step.
 _TOOL_DISPATCH: Dict[tuple, Callable[..., Dict[str, Any]]] = {
     ("filesystem", "read"): filesystem.read,
     ("filesystem", "write"): filesystem.write,
     ("filesystem", "list"): filesystem.list_dir,
     ("terminal", "run"): terminal.run,
+    ("worker_ts_check", ""): WorkerTsCheck().run,
+    ("worker_ts_fix", ""): WorkerTsFix().run,
+    ("worker_jsdoc", ""): WorkerJsdoc().run,
+    ("worker_test_writer", ""): WorkerTestWriter().run,
+    ("worker_commit_msg", ""): WorkerCommitMsg().run,
+    ("worker_diff_summary", ""): WorkerDiffSummary().run,
 }
 
 

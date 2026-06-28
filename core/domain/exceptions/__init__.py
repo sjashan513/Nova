@@ -45,6 +45,9 @@ Fase 2 / Director Execution Layer ADR and the Fase 3 / Worker Layer ADR):
       |     |                              # a model (registry: requires_
       |     |                              # model=true) but Step.model
       |     |                              # is not set
+      |     +-- InvalidProjectError         # Fase 3 -- Step.input declares
+      |     |                              # a "project" not in
+      |     |                              # registry/project_registry.yaml
       |     +-- InvalidStepReferenceError  # depends_on references a
       |     |                              # step_id that doesn't exist
       |     |                              # in the plan (Fase 2)
@@ -67,6 +70,13 @@ Fase 2 / Director Execution Layer ADR and the Fase 3 / Worker Layer ADR):
       |     |
       |     +-- StepExecutionError      # one failed attempt, wraps the
       |     |                           # real underlying exception
+      |     +-- WorkerExecutionError    # Fase 3 -- a Worker's OWN
+      |     |                           # internal error policy is
+      |     |                           # already exhausted; sibling of
+      |     |                           # RetriesExhaustedError (an
+      |     |                           # outcome), not of
+      |     |                           # StepExecutionError (one
+      |     |                           # attempt)
       |     +-- RetriesExhaustedError   # Level 1 retry budget spent,
       |                                 # carries every attempt's error
       |
@@ -91,33 +101,34 @@ checks -- by design, a plan that fails parsing or contract validation
 never reaches the Router.
 """
 
-from .nova_error import NovaError
+from core.domain.exceptions.nova_error import NovaError
 
-from .planner_errors import (
+from core.domain.exceptions.planner_errors import (
     PlannerError,
     PlannerResponseError,
     PlannerValidationError,
 )
 
-from .contract_errors import (
+from core.domain.exceptions.contract_errors import (
     PlanContractError,
     WorkerNotFoundError,
     ToolNotFoundError,
     MissingModelError,
+    InvalidProjectError,
     InvalidStepReferenceError,
     CyclicDependencyError,
     UndeclaredDependencyError,
     PlanContractErrorGroup,
 )
 
-from .execution_errors import (
+from core.domain.exceptions.execution_errors import (
     ExecutionError,
     StepExecutionError,
-    RetriesExhaustedError,
     WorkerExecutionError,
+    RetriesExhaustedError,
 )
 
-from .divergence_errors import DivergenceError
+from core.domain.exceptions.divergence_errors import DivergenceError
 
 __all__ = [
     "NovaError",
@@ -128,6 +139,7 @@ __all__ = [
     "WorkerNotFoundError",
     "ToolNotFoundError",
     "MissingModelError",
+    "InvalidProjectError",
     "InvalidStepReferenceError",
     "CyclicDependencyError",
     "UndeclaredDependencyError",

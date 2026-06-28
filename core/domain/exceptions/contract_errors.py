@@ -12,7 +12,7 @@ for a plan that fails any check in this family.
 
 from typing import List, Optional
 
-from .nova_error import NovaError
+from core.domain.exceptions.nova_error import NovaError
 
 
 class PlanContractError(NovaError):
@@ -113,6 +113,48 @@ class MissingModelError(PlanContractError):
             f"Step '{step_id}' uses worker '{raw_value}', which requires "
             f"a model (registry: requires_model=true), but Step.model is "
             f"not set."
+        )
+        super().__init__(message, plan_id, step_id, raw_value)
+
+
+class InvalidProjectError(PlanContractError):
+    """
+    Fase 3. A Step's input declares a "project" key (e.g.
+    {"project": "Pulse"}) that does not exist in
+    registry/project_registry.yaml. Same category as
+    WorkerNotFoundError/ToolNotFoundError/MissingModelError -- detected
+    before the Router, no lock acquired -- but specific to the case
+    where a Worker needs to know WHICH catalogued project it's
+    operating on (worker_ts_check today; worker_test_runner/
+    worker_build later, once they exist).
+
+    Kimi is expected to know the project catalog at planning time
+    (same as it already knows IMPLEMENTED_TOOLS_AND_WORKERS) -- this
+    check exists as a safety net for when that expectation is violated
+    (a hallucinated project name, a typo), not as the only line of
+    defense. The Worker itself also validates this independently at
+    execution time and returns its own status: "error" if the project
+    is missing -- defense in depth, same principle execute_with_retry
+    already applies by never assuming `fn` can only fail in expected
+    ways.
+
+    Only fires for Steps whose `input` actually contains a "project"
+    key -- a Step that doesn't reference any project at all (most
+    primitive tool steps, most LLM workers that don't need filesystem
+    project context) is simply not checked by this rule.
+    """
+
+    def __init__(
+        self,
+        plan_id: Optional[str],
+        step_id: str,
+        raw_value: str,
+        available_projects: List[str],
+    ):
+        self.available_projects = available_projects
+        message = (
+            f"Step '{step_id}' references unknown project '{raw_value}'. "
+            f"Available projects: {', '.join(available_projects) or '(none registered)'}"
         )
         super().__init__(message, plan_id, step_id, raw_value)
 

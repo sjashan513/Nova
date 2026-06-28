@@ -39,7 +39,16 @@ def _build_registry_context() -> str:
 
 
 def _build_project_context() -> str:
-    """Loads project_registry.yaml verbatim as text context."""
+    """
+    Loads project_registry.yaml verbatim as text context. This is
+    what the "project" rule below points back to -- Kimi must copy a
+    name EXACTLY from this list into any worker_* step's input, never
+    invent or rephrase one. See
+    core/planner/validators.py::validate_step_projects_exist /
+    core/domain/exceptions/contract_errors.py::InvalidProjectError for
+    the contract check that catches it if this rule is violated
+    anyway.
+    """
     with open(_PROJECT_REGISTRY_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
@@ -70,6 +79,12 @@ def _build_project_context() -> str:
 IMPLEMENTED_TOOLS_AND_WORKERS = [
     "filesystem (actions: read, write, list)",
     "terminal (action: run)",
+    "worker_ts_check",
+    "worker_ts_fix",
+    "worker_jsdoc",
+    "worker_test_writer",
+    "worker_commit_msg",
+    "worker_diff_summary",
 ]
 
 
@@ -141,6 +156,12 @@ to the real value before execution, you do not need to know what the \
 real value will be. Only reference a step_id that is listed in this \
 step's own "depends_on" -- referencing a step you don't depend on \
 means its result may not exist yet when this step runs.
+- Every worker_* step's "input" MUST include a "project" key whose \
+value is EXACTLY one of the names listed under "KNOWN PROJECTS" below \
+-- never invent a project name, never abbreviate or rephrase one. This \
+is how a worker knows which codebase it's operating on. A worker_* \
+step with no "project" key, or one that doesn't match a known project \
+name exactly, will fail contract validation before it ever runs.
 - List "steps" in an order where every step's dependencies appear \
 EARLIER in the list than the step itself. This must hold even though \
 step ordering and execution are conceptually separate concerns.

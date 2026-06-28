@@ -43,6 +43,7 @@ from core.domain.exceptions import (
     WorkerNotFoundError,
     ToolNotFoundError,
     MissingModelError,
+    InvalidProjectError,
 )
 from registry.tool_registry import tool_exists, list_tool_names
 from registry.worker_registry import (
@@ -50,6 +51,7 @@ from registry.worker_registry import (
     list_worker_names,
     worker_requires_model,
 )
+from registry.project_registry import project_exists, list_project_names
 
 _WORKER_PREFIX = "worker_"
 
@@ -157,6 +159,47 @@ def validate_worker_steps_have_model(
     return errors
 
 
+def validate_step_projects_exist(
+    plan: Plan, plan_id: Optional[str] = None
+) -> List[PlanContractError]:
+    """
+    Checks every Step whose `input` declares a "project" key (e.g.
+    {"project": "Pulse"}) references a project that actually exists
+    in registry/project_registry.yaml.
+
+    Only checks Steps that have a "project" key in their input at
+    all -- a Step with no project reference (most primitive tool
+    steps, most LLM workers that don't need filesystem project
+    context) is simply skipped, not flagged. This is a safety net for
+    when Kimi's expectation of the project catalog is violated (a
+    hallucinated name, a typo) -- not the only line of defense; the
+    Worker itself (e.g. worker_ts_check) also validates this
+    independently at execution time, defense in depth, same principle
+    execute_with_retry already applies by never assuming `fn` can
+    only fail in expected ways.
+
+    Returns a list of errors (empty = valid), same pattern as every
+    other contract check in this codebase.
+    """
+    errors: List[PlanContractError] = []
+
+    for step in plan.steps:
+        project_name = step.input.get("project")
+        if project_name is None:
+            continue
+        if not project_exists(project_name):
+            errors.append(
+                InvalidProjectError(
+                    plan_id=plan_id,
+                    step_id=step.id,
+                    raw_value=project_name,
+                    available_projects=list_project_names(),
+                )
+            )
+
+    return errors
+
+
 def validate_plan_contract(
     plan: Plan, plan_id: Optional[str] = None
 ) -> List[PlanContractError]:
@@ -179,4 +222,5 @@ def validate_plan_contract(
     return (
         validate_plan_against_registry(plan, plan_id)
         + validate_worker_steps_have_model(plan, plan_id)
+        + validate_step_projects_exist(plan, plan_id)
     )

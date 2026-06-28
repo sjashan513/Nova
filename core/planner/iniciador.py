@@ -47,6 +47,7 @@ from core.domain.exceptions import (
     WorkerNotFoundError,
     ToolNotFoundError,
     MissingModelError,
+    InvalidProjectError,
 )
 from core.planner import planner
 from core.planner.validators import validate_plan_contract
@@ -85,6 +86,12 @@ def _build_retry_context(errors: List[PlanContractError]) -> str:
                 f"  - Step '{err.step_id}': worker '{err.raw_value}' "
                 f"requires a model -- set \"model\" to a valid model "
                 f"string for this step."
+            )
+        elif isinstance(err, InvalidProjectError):
+            lines.append(
+                f"  - Step '{err.step_id}': '{err.raw_value}' is not a "
+                f"registered project. Valid projects: "
+                f"{', '.join(err.available_projects)}"
             )
         else:
             # Defensive fallback -- should not happen with today's

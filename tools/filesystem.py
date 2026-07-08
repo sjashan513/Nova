@@ -32,6 +32,7 @@ def read(path: str) -> Dict[str, Any]:
     IsADirectoryError, or UnicodeDecodeError as-is on failure -- see
     module docstring for why these are not caught here.
     """
+    path = os.path.expanduser(path)
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
@@ -45,6 +46,7 @@ def write(path: str, content: str) -> Dict[str, Any]:
     directories -- a path with a nonexistent parent raises
     FileNotFoundError, same as the underlying `open()` call would.
     """
+    path = os.path.expanduser(path)
     with open(path, "w", encoding="utf-8") as f:
         bytes_written = f.write(content)
 
@@ -56,6 +58,7 @@ def list_dir(path: str) -> Dict[str, Any]:
     Lists the entries of a directory (not recursive). Raises
     FileNotFoundError or NotADirectoryError as-is on failure.
     """
+    path = os.path.expanduser(path)
     entries: List[str] = os.listdir(path)
 
     return {"path": path, "entries": entries}

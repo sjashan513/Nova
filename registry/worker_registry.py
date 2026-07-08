@@ -10,7 +10,7 @@ list.
 """
 
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 import yaml
 
 _REGISTRY_PATH = Path(__file__).parent / "tool_registry.yaml"
@@ -60,3 +60,17 @@ def worker_requires_model(name: str) -> bool:
     if entry is None:
         return False
     return bool(entry.get("requires_model", False))
+
+
+def get_worker_default_model(name: str) -> Optional[str]:
+    """
+    Returns the default_model string for a worker that requires one,
+    or None if the worker doesn't require a model or doesn't exist.
+    The Director uses this to inject a model into worker steps where
+    step.model was not set by the Planner -- the Planner no longer
+    needs to know or care about model strings.
+    """
+    entry = WORKERS_BY_NAME.get(name)
+    if entry is None:
+        return None
+    return entry.get("default_model", None)

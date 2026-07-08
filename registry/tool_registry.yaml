@@ -18,55 +18,148 @@ workers:
       description: "Runs tsc and returns structured compiler output. No LLM."
       module: "workers.coding.worker_ts_check"
       requires_model: false
+      required_input_keys:
+        - project
+      output_keys:
+        - errors        # list of error dicts: {file, line, column, code, message} -- pass "$<this_step>.errors" to worker_ts_fix
+        - error_count   # int, always len(errors)
+
     - name: "worker_ts_fix"
       description: "Fixes TypeScript errors with minimal changes only."
       module: "workers.coding.worker_ts_fix"
       requires_model: true
+      default_model: "z-ai/glm-5.2"
+      required_input_keys:
+        - project
+        - file_content  # full text of the file to fix -- read with filesystem.read first, then pass "$<read_step>.content"
+        - errors        # list of error dicts from a prior worker_ts_check step -- pass "$<check_step>.errors"
+      output_keys:
+        - fixed_content  # the complete corrected file -- pass "$<this_step>.fixed_content" to filesystem.write
+        - changes_made   # list of short descriptions of each change applied
+
     - name: "worker_jsdoc"
       description: "Adds JSDoc to exported symbols. Never touches logic."
       module: "workers.coding.worker_jsdoc"
       requires_model: true
+      default_model: "z-ai/glm-5.2"
+      required_input_keys:
+        - project
+        - file_content  # full text of the file to document -- read with filesystem.read first, then pass "$<read_step>.content"
+      output_keys:
+        - documented_content  # the complete file with JSDoc added -- pass "$<this_step>.documented_content" to filesystem.write
+        - symbols_documented  # list of symbol names that received JSDoc
+
     - name: "worker_commit_msg"
       description: "Generates conventional commit messages from a diff."
       module: "workers.coding.worker_commit_msg"
       requires_model: true
+      default_model: "z-ai/glm-5.2"
+      required_input_keys:
+        - project
+        - diff  # full git diff text -- run "git diff" with terminal.run first, then pass "$<terminal_step>.stdout"
+      output_keys:
+        - message  # the conventional commit message string
+
     - name: "worker_diff_summary"
       description: "Plain language summary of a diff."
       module: "workers.coding.worker_diff_summary"
       requires_model: true
+      default_model: "z-ai/glm-5.2"
+      required_input_keys:
+        - project
+        - diff  # full git diff text -- run "git diff" with terminal.run first, then pass "$<terminal_step>.stdout"
+      output_keys:
+        - summary  # plain-language prose summary of the diff
+
     - name: "worker_code_review"
       description: "Structured code review issues by severity."
       module: "workers.coding.worker_code_review"
       requires_model: true
+      default_model: "z-ai/glm-5.2"
+      required_input_keys:
+        - project
+        - file_content  # full text of the file to review -- read with filesystem.read first, then pass "$<read_step>.content"
+      output_keys:
+        - issues  # list of issue dicts: {severity, line, message}
+
     - name: "worker_refactor"
       description: "Applies one refactor pattern per call."
       module: "workers.coding.worker_refactor"
       requires_model: true
+      default_model: "z-ai/glm-5.2"
+      required_input_keys:
+        - project
+        - file_content  # full text of the file to refactor -- read with filesystem.read first, then pass "$<read_step>.content"
+        - pattern       # the specific refactor pattern to apply (e.g. "extract function", "rename variable")
+      output_keys:
+        - refactored_content  # the complete refactored file -- pass "$<this_step>.refactored_content" to filesystem.write
+        - changes_made        # list of short descriptions of each change applied
+
     - name: "worker_test_writer"
       description: "Language-agnostic test generation."
       module: "workers.coding.worker_test_writer"
       requires_model: true
-    - name: "worker_test_runner"
-      description: "Runs tests and returns structured results. No LLM."
-      module: "workers.coding.worker_test_runner"
-      requires_model: false
+      default_model: "z-ai/glm-5.2"
+      required_input_keys:
+        - project
+        - file_content  # full text of the file to write tests for -- read with filesystem.read first, then pass "$<read_step>.content"
+      output_keys:
+        - test_content  # the complete test file content -- pass "$<this_step>.test_content" to filesystem.write
+        - test_count    # int, model's self-reported count of test cases written
+
+    # - name: "worker_test_runner"
+    #   description: "Runs tests and returns structured results. No LLM."
+    #   module: "workers.coding.worker_test_runner"
+    #   requires_model: false
+    #   required_input_keys:
+    #     - project
+    #   output_keys:
+    #     - passed   # int
+    #     - failed   # int
+    #     - output   # full test runner output as string
+
     - name: "worker_build"
       description: "Runs the build and returns structured output. No LLM."
       module: "workers.coding.worker_build"
       requires_model: false
+      required_input_keys:
+        - project
+      output_keys:
+        - success     # bool
+        - exit_code   # int
+        - output      # full build output as string
+
     - name: "worker_dependency_check"
       description: "Checks for outdated or vulnerable dependencies. No LLM."
       module: "workers.coding.worker_dependency_check"
       requires_model: false
+      required_input_keys:
+        - project
+      output_keys:
+        - outdated      # list of outdated dependency dicts
+        - vulnerabilities  # list of vulnerability dicts
 
     # --- QA domain ---
     - name: "worker_qa_consolidate"
       description: "Merges multiple proposed versions of the same file into one."
       module: "workers.qa.worker_qa_consolidate"
       requires_model: true
+      default_model: "z-ai/glm-5.2"
+      required_input_keys:
+        - project
+        - versions  # list of file content strings to merge
+      output_keys:
+        - merged_content  # the complete merged file -- pass "$<this_step>.merged_content" to filesystem.write
 
     # --- ENVIRONMENT domain ---
     - name: "worker_env_snapshot"
       description: "Fetches VSCode editor state via the local HTTP extension. No LLM."
       module: "workers.environment.worker_env_snapshot"
       requires_model: false
+      required_input_keys: []
+      output_keys:
+        - active_file    # absolute path of the currently active file in VSCode
+        - project        # detected project name
+        - branch         # current git branch
+        - open_tabs      # list of open file paths
+        - language       # language of the active file

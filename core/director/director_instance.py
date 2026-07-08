@@ -56,7 +56,10 @@ Pipeline, per run():
               -- mark the Plan FAILED, stop, propagate the error
 """
 
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from core.domain.models import Plan, Step
@@ -74,6 +77,7 @@ from workers.coding.worker_jsdoc import WorkerJsdoc
 from workers.coding.worker_test_writer import WorkerTestWriter
 from workers.coding.worker_commit_msg import WorkerCommitMsg
 from workers.coding.worker_diff_summary import WorkerDiffSummary
+from registry.worker_registry import get_worker_default_model
 
 PlanStatus = Literal["PENDING", "RUNNING", "DONE", "FAILED"]
 
@@ -84,6 +88,8 @@ PlanStatus = Literal["PENDING", "RUNNING", "DONE", "FAILED"]
 # would couple director/ to planner/ for one constant, which the
 # dependency direction in NOVA_CLI_MVP_ROADMAP.md §0.2 doesn't call
 # for.
+_LOG_LOCK = threading.Lock()
+
 _WORKER_PREFIX = "worker_"
 
 # Maps (tool_or_worker, action) to the real callable that performs it.
@@ -255,6 +261,22 @@ class DirectorInstance:
              two models exist; it just reads "model" from its own
              input like any other field.
         """
+        # --- Step execution log (Fase 4) ---
+        # Print timestamp + step label before and after each step so
+        # the terminal is never a blank screen during execution.
+        # Uses a threading.Lock to avoid interleaved output when two
+        # steps in the same level run in parallel and both try to print
+        # at the same time -- the lock is module-level so all instances
+        # share it, which is fine: it's only held for a single print().
+        label = (
+            f"{step.tool_or_worker}"
+            + (f".{step.action}" if step.action else "")
+        )
+        def ts(): return datetime.now().strftime("%H:%M:%S")
+        with _LOG_LOCK:
+            print(f"  [{ts()}] → {step.id} {label}")
+
+        t0 = time.monotonic()
         resolved_input = resolve_step_input(step, self.context)
 
         dispatch_key = (step.tool_or_worker, step.action)
@@ -270,30 +292,49 @@ class DirectorInstance:
 
         is_worker_step = step.tool_or_worker.startswith(_WORKER_PREFIX)
 
-        if not is_worker_step:
-            return execute_with_retry(
-                fn=lambda: dispatch_fn(**resolved_input),
-                step_id=step.id,
-            )
+        # Fase 4: modelo inyectado por el Director, no por el Planner.
+        # Si step.model no fue declarado explícitamente en el plan, lo
+        # resolvemos aquí desde el registry (default_model). El Planner
+        # nunca necesita saber qué modelo usar -- esa es una decisión
+        # de ejecución, no de planificación.
+        effective_model = step.model
+        if is_worker_step and effective_model is None:
+            effective_model = get_worker_default_model(step.tool_or_worker)
 
-        if step.model is None:
-            return execute_with_retry(
-                fn=lambda: dispatch_fn(resolved_input),
-                step_id=step.id,
-            )
+        try:
+            if not is_worker_step:
+                result = execute_with_retry(
+                    fn=lambda: dispatch_fn(**resolved_input),
+                    step_id=step.id,
+                )
+            elif effective_model is None:
+                result = execute_with_retry(
+                    fn=lambda: dispatch_fn(resolved_input),
+                    step_id=step.id,
+                )
+            else:
+                def make_call(model: Optional[str]) -> Callable[[], Dict[str, Any]]:
+                    # A fresh dict per call -- never mutate resolved_input
+                    # itself, since make_call may be invoked twice (primary,
+                    # then fallback) and each call must carry its own model
+                    # without the second overwriting context the first one
+                    # still needs if something inspects it after the fact.
+                    step_input = {**resolved_input, "model": model}
+                    return lambda: dispatch_fn(step_input)
 
-        def make_call(model: Optional[str]) -> Callable[[], Dict[str, Any]]:
-            # A fresh dict per call -- never mutate resolved_input
-            # itself, since make_call may be invoked twice (primary,
-            # then fallback) and each call must carry its own model
-            # without the second overwriting context the first one
-            # still needs if something inspects it after the fact.
-            step_input = {**resolved_input, "model": model}
-            return lambda: dispatch_fn(step_input)
+                result = execute_with_fallback(
+                    fn_factory=make_call,
+                    step_id=step.id,
+                    primary_model=effective_model,
+                    fallback_model=step.fallback_model,
+                )
+        except Exception:
+            elapsed = time.monotonic() - t0
+            with _LOG_LOCK:
+                print(f"  [{ts()}] ✗ {step.id} {label}  ({elapsed:.1f}s)")
+            raise
 
-        return execute_with_fallback(
-            fn_factory=make_call,
-            step_id=step.id,
-            primary_model=step.model,
-            fallback_model=step.fallback_model,
-        )
+        elapsed = time.monotonic() - t0
+        with _LOG_LOCK:
+            print(f"  [{ts()}] ✓ {step.id} {label}  ({elapsed:.1f}s)")
+        return result

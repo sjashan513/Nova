@@ -42,14 +42,12 @@ from core.domain.exceptions import (
     PlanContractError,
     WorkerNotFoundError,
     ToolNotFoundError,
-    MissingModelError,
     InvalidProjectError,
 )
 from registry.tool_registry import tool_exists, list_tool_names
 from registry.worker_registry import (
     worker_exists,
     list_worker_names,
-    worker_requires_model,
 )
 from registry.project_registry import project_exists, list_project_names
 
@@ -103,58 +101,6 @@ def validate_plan_against_registry(
                         available_tools=list_tool_names(),
                     )
                 )
-
-    return errors
-
-
-def validate_worker_steps_have_model(
-    plan: Plan, plan_id: Optional[str] = None
-) -> List[PlanContractError]:
-    """
-    Checks every worker Step that requires an LLM (requires_model: true
-    in registry/tool_registry.yaml for that worker) has Step.model set.
-
-    Deliberately skips, rather than flags, three cases:
-      - tool_or_worker is not a worker at all (primitive tool) -- not
-        this function's concern.
-      - tool_or_worker IS shaped like a worker name but does not exist
-        in the registry -- that is validate_plan_against_registry's
-        job (WorkerNotFoundError). Re-flagging it here too would
-        produce two errors for the same root cause and clutter the
-        retry context built for Kimi with redundant noise.
-      - tool_or_worker exists and requires_model is false (e.g.
-        worker_ts_check) -- nothing to check; that worker has no
-        concept of a model at all.
-
-    Does NOT check Step.fallback_model -- that field is optional by
-    design (see NOVA_WORKER_LAYER_ADR.md §7: nova_technical_overview.md
-    describes it as "if primary fails"). A Step with no fallback_model
-    simply has no Level 2 fallback available and escalates straight to
-    Level 3 if its primary model call fails -- expected behavior, not
-    a contract violation.
-
-    Returns a list of errors (empty = valid), same pattern as every
-    other contract check in this codebase.
-    """
-    errors: List[PlanContractError] = []
-
-    for step in plan.steps:
-        ref = step.tool_or_worker
-
-        if not ref.startswith(_WORKER_PREFIX):
-            continue
-        if not worker_exists(ref):
-            continue
-        if not worker_requires_model(ref):
-            continue
-        if step.model is None:
-            errors.append(
-                MissingModelError(
-                    plan_id=plan_id,
-                    step_id=step.id,
-                    raw_value=ref,
-                )
-            )
 
     return errors
 
@@ -221,6 +167,5 @@ def validate_plan_contract(
     """
     return (
         validate_plan_against_registry(plan, plan_id)
-        + validate_worker_steps_have_model(plan, plan_id)
         + validate_step_projects_exist(plan, plan_id)
     )

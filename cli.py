@@ -1,7 +1,45 @@
-import sys
+"""
+Nova CLI — Fase 4: Planner + Director conectados de punta a punta.
+
+Flujo completo:
+    Nova> "arregla signal.ts"
+      → Iniciador.get_plan()        (Kimi via NIM)
+      → _print_plan()               (muestra el plan al usuario)
+      → _confirm_execution()        (pregunta confirmación)
+      → DirectorInstance.run()      (ejecuta el plan real)
+      → _print_execution_result()   (muestra el contexto raw, truncado a 300 chars)
+
+Cambios respecto a Fase 3:
+  - Imports: DirectorInstance + RetriesExhaustedError añadidos.
+  - _confirm_execution(): nueva función, pregunta [s/n] antes de ejecutar.
+  - _execute_plan(): nueva función, instancia DirectorInstance y gestiona
+    RetriesExhaustedError (el único error nuevo que puede salir del Director
+    que el CLI no manejaba antes; PlanContractErrorGroup ya estaba).
+  - _print_execution_result(): nueva función, itera el contexto por step,
+    trunca cada value a 300 chars para que el terminal no explote con
+    contenido de ficheros TypeScript completos.
+  - _print_retries_exhausted(): nueva función, formatea RetriesExhaustedError
+    mostrando cada intento con su error original.
+  - main(): después de _print_plan, ahora llama _execute_plan si el usuario
+    confirma. Sin confirmación, el plan se descarta sin ejecutar nada.
+
+Nada más cambió. DirectorInstance, Iniciador, planner.py, models.py
+están sellados y no se tocan.
+"""
 
 from core.planner.iniciador import Iniciador
-from core.domain.exceptions import PlanContractErrorGroup, PlannerError, PlanContractError
+from core.director.director_instance import DirectorInstance
+from core.domain.exceptions import (
+    PlanContractErrorGroup,
+    PlannerError,
+    PlanContractError,
+    RetriesExhaustedError,
+)
+
+# Values del contexto truncados a este límite -- suficiente para ver
+# qué devolvió cada step sin que el terminal explote con el contenido
+# completo de un fichero TypeScript de 500 líneas.
+_CONTEXT_VALUE_TRUNCATE = 300
 
 
 def _print_plan(plan) -> None:
@@ -35,8 +73,101 @@ def _print_planner_error(e: PlannerError) -> None:
         print(f"  raw_response: {e.raw_response!r}")
 
 
+def _confirm_execution() -> bool:
+    """
+    Pregunta confirmación antes de ejecutar el plan. Cualquier respuesta
+    que no sea "s" (case-insensitive) descarta la ejecución sin tocar
+    nada. Esto es el human-in-the-loop mínimo de Fase 4 -- en Fase 5
+    (diff gate) el punto de confirmación se mueve al nivel del Step
+    crítico, pero para el CLI de texto de esta fase, una confirmación
+    por plan es suficiente.
+    """
+    try:
+        answer = input("\n¿Ejecutar este plan? [s/n]: ").strip().lower()
+        return answer == "s"
+    except (EOFError, KeyboardInterrupt):
+        # EOF en entornos no interactivos, o Ctrl+C durante la pregunta
+        # -- tratar como "no" en ambos casos, nunca ejecutar por defecto.
+        return False
+
+
+def _print_execution_result(result: dict) -> None:
+    """
+    Imprime el contexto raw del Director, step por step, truncando cada
+    value a _CONTEXT_VALUE_TRUNCATE chars. El contexto es un dict plano
+    {step_id: {key: value}} donde cada value puede ser un str (contenido
+    de fichero, stdout), un int (exit_code, bytes_written), o una lista
+    (entries de directorio, args).
+
+    repr() en lugar de str() para que los strings muestren sus comillas
+    y los None/int se distingan visualmente de strings vacíos -- útil
+    para debugging.
+    """
+    print(
+        f"\n[DONE] Plan ejecutado. {len(result['context'])} step(s) completados.")
+    print("\nContexto por step:")
+    for step_id, output in result["context"].items():
+        print(f"  [{step_id}]:")
+        if not output:
+            print("    (sin output)")
+            continue
+        for key, value in output.items():
+            raw = repr(value)
+            truncated = raw[:_CONTEXT_VALUE_TRUNCATE]
+            suffix = "..." if len(raw) > _CONTEXT_VALUE_TRUNCATE else ""
+            print(f"    {key}: {truncated}{suffix}")
+
+
+def _print_retries_exhausted(e: RetriesExhaustedError) -> None:
+    """
+    Formatea RetriesExhaustedError mostrando cada intento con su error
+    original. En el caso de WorkerExecutionError (short-circuit de Nivel 1),
+    e.attempts tiene exactamente un elemento -- esto es correcto y esperado,
+    no un bug (ver error_policy.py::execute_with_retry).
+    """
+    print(f"\n[RetriesExhaustedError] Step '{e.step_id}' falló tras "
+          f"{len(e.attempts)} intento(s):")
+    for attempt in e.attempts:
+        print(f"  intento {attempt.attempt}: {type(attempt.original_error).__name__}: "
+              f"{attempt.original_error}")
+
+
+def _execute_plan(plan) -> None:
+    """
+    Instancia un DirectorInstance fresco para este plan y lo ejecuta.
+    Un DirectorInstance por plan, nunca reutilizado -- ver
+    director_instance.py's module docstring ("Una instancia, un Plan").
+
+    Errores manejados aquí:
+      - RetriesExhaustedError: un step agotó su presupuesto de reintentos
+        (Nivel 1 + Nivel 2 si había fallback_model). El plan quedó FAILED.
+      - PlanContractErrorGroup: el DAG o las referencias de input son
+        inválidas -- el Director lo detecta antes de ejecutar cualquier
+        step. No debería ocurrir si el Iniciador hizo su trabajo, pero
+        se captura como safety net (el mismo handler que ya existe para
+        el caso del Iniciador).
+
+    Cualquier otra excepción no capturada aquí sube al handler genérico
+    del main loop (Exception) -- no se silencia nada.
+    """
+    director = DirectorInstance(plan)
+    try:
+        result = director.run()
+        _print_execution_result(result)
+    except RetriesExhaustedError as e:
+        _print_retries_exhausted(e)
+    except PlanContractErrorGroup as e:
+        # Safety net -- el Iniciador ya validó el contrato, pero si el
+        # DAG tiene un problema que validate_plan_contract no cubre
+        # (validate_dag lo detecta en el Director), este handler evita
+        # que el error suba sin contexto al main loop genérico.
+        print(f"\n[PlanContractErrorGroup] El Director rechazó el plan "
+              f"antes de ejecutar nada. {len(e.errors)} error(s):")
+        _print_contract_error_group(e)
+
+
 def main():
-    print("Nova CLI v1.0 - Initialized (Phase 1: Planner connected)")
+    print("Nova CLI v1.0 - Initialized (Phase 4: Planner + Director connected)")
     print("Type 'exit' or 'quit' to terminate.")
 
     iniciador = Iniciador()
@@ -66,27 +197,27 @@ def main():
             try:
                 response = iniciador.get_plan(user_input)
             except PlanContractErrorGroup as e:
-                # Most specific exception first -- PlanContractErrorGroup
-                # IS a PlanContractError, so it must be caught before the
-                # broader PlanContractError handler below, or this branch
-                # would never be reached.
                 _print_contract_error_group(e)
                 continue
             except PlannerError as e:
                 _print_planner_error(e)
                 continue
             except PlanContractError as e:
-                # A single, non-grouped PlanContractError should not
-                # normally escape the Iniciador's retry loop (it always
-                # wraps into a Group on exhaustion) -- caught here only
-                # as a safety net, not an expected path.
                 print(f"\n[{type(e).__name__}] {e}")
                 continue
 
             if response["status"] == "clarification_needed":
                 _print_clarification(response["questions"])
+                continue
+
+            # status == "ready" -- mostrar el plan y pedir confirmación
+            # antes de tocar cualquier fichero o llamar a cualquier worker.
+            _print_plan(response["plan"])
+
+            if _confirm_execution():
+                _execute_plan(response["plan"])
             else:
-                _print_plan(response["plan"])
+                print("Ejecución cancelada.")
 
         except KeyboardInterrupt:
             print("\nForced shutdown detected. Closing...")

@@ -8,6 +8,7 @@ treats it as an opaque string -- nothing in planner.py should know or
 care about the prompt's internal structure.
 """
 
+from pathlib import Path
 from typing import List
 
 import yaml
@@ -21,19 +22,48 @@ _PROJECT_REGISTRY_PATH = "registry/project_registry.yaml"
 def _build_registry_context() -> str:
     """
     Serializes the full Tool + Worker catalogs into a plain-text block
-    for the system prompt. Kimi reads this to know what Nova can do and
-    to pick exact, valid names for Step.tool_or_worker -- this is what
-    makes validate_plan_against_registry's job possible in the first
-    place: Kimi is never guessing a name nobody gave it.
+    for the system prompt. The Planner reads this to know what Nova can
+    do, pick exact valid names for Step.tool_or_worker, know exactly
+    what each worker needs in its input (required_input_keys), and know
+    exactly what field names each worker produces in its output
+    (output_keys) -- so $step_id.field references are always correct.
     """
     lines: List[str] = ["AVAILABLE TOOLS (primitive, no LLM):"]
     for name, entry in TOOLS_BY_NAME.items():
         lines.append(f"  - {name}: {entry.get('description', '')}")
 
     lines.append("")
-    lines.append("AVAILABLE WORKERS (LLM-powered, one job each):")
+    lines.append("AVAILABLE WORKERS (one job each):")
     for name, entry in WORKERS_BY_NAME.items():
         lines.append(f"  - {name}: {entry.get('description', '')}")
+
+        required_keys = entry.get("required_input_keys", [])
+        if required_keys:
+            lines.append(
+                f"    Required input keys (must appear in this step's \"input\"):")
+            for key in required_keys:
+                # Inline comments in the YAML value (after "#") carry
+                # the hint about which prior step produces each key.
+                parts = str(key).split("#", 1)
+                key_name = parts[0].strip()
+                hint = parts[1].strip() if len(parts) > 1 else None
+                if hint:
+                    lines.append(f"      - {key_name}: {hint}")
+                else:
+                    lines.append(f"      - {key_name}")
+
+        output_keys = entry.get("output_keys", [])
+        if output_keys:
+            lines.append(
+                f"    Output keys (reference as \"$<this_step_id>.<key>\" in later steps):")
+            for key in output_keys:
+                parts = str(key).split("#", 1)
+                key_name = parts[0].strip()
+                hint = parts[1].strip() if len(parts) > 1 else None
+                if hint:
+                    lines.append(f"      - {key_name}: {hint}")
+                else:
+                    lines.append(f"      - {key_name}")
 
     return "\n".join(lines)
 
@@ -58,6 +88,37 @@ def _build_project_context() -> str:
             f"  - {project_name}: path={info.get('path')}, "
             f"lang={info.get('lang')}, run={info.get('run')}, test={info.get('test')}"
         )
+    return "\n".join(lines)
+
+
+_SKILLS_DIR = Path(__file__).parent.parent.parent / "registry" / "skills"
+
+
+def _build_skills_context() -> str:
+    """
+    Loads all .md files from registry/skills/ and injects them as a
+    SKILLS block in the system prompt. Each skill file encodes planning
+    rules for a specific domain (dev, typescript, etc.) -- the Planner
+    reads these exactly like the registry context, as hard constraints
+    to follow when generating a plan.
+
+    Files are loaded in alphabetical order. Missing directory is
+    silently ignored -- no skills block is injected if the directory
+    doesn't exist yet.
+    """
+    if not _SKILLS_DIR.exists():
+        return ""
+
+    skill_files = sorted(_SKILLS_DIR.glob("*.md"))
+    if not skill_files:
+        return ""
+
+    lines = [
+        "PLANNING SKILLS (follow these rules exactly when generating plans):"]
+    for skill_file in skill_files:
+        lines.append(f"\n--- {skill_file.stem.upper()} SKILL ---")
+        lines.append(skill_file.read_text(encoding="utf-8").strip())
+
     return "\n".join(lines)
 
 
@@ -109,6 +170,8 @@ ambiguous.
 {implementation_status_context}
 
 {project_context}
+
+{skills_context}
 
 RESPONSE CONTRACT — you must respond with ONLY valid JSON, no prose \
 before or after, no markdown code fences. Your response must be exactly \
@@ -162,6 +225,10 @@ value is EXACTLY one of the names listed under "KNOWN PROJECTS" below \
 is how a worker knows which codebase it's operating on. A worker_* \
 step with no "project" key, or one that doesn't match a known project \
 name exactly, will fail contract validation before it ever runs.
+- Do NOT include a "model" field in any step. The Director injects \
+the model automatically at execution time from the worker registry. \
+The Planner only decides what to do and in what order, not which \
+model executes each step.
 - List "steps" in an order where every step's dependencies appear \
 EARLIER in the list than the step itself. This must hold even though \
 step ordering and execution are conceptually separate concerns.
@@ -177,4 +244,5 @@ def build_system_prompt() -> str:
         registry_context=_build_registry_context(),
         implementation_status_context=_build_implementation_status_context(),
         project_context=_build_project_context(),
+        skills_context=_build_skills_context(),
     )

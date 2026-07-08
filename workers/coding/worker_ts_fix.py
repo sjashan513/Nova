@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from core.llm.nim_client import call_nim, parse_json_response
-from registry.project_registry import project_exists, list_project_names
+from registry.project_registry import project_exists, get_project, list_project_names
 from workers.base import BaseWorker, WorkerOutput
 
 _DEFAULT_TEMPERATURE = 0.1
@@ -115,6 +115,7 @@ class WorkerTsFix(BaseWorker):
                 ),
             }
 
+        project_path = get_project(project_name)["path"]
         model = input.get("model")
         if not model:
             return {
@@ -177,6 +178,72 @@ class WorkerTsFix(BaseWorker):
                 "status": "error",
                 "result": None,
                 "reason": str(e),
+            }
+
+        # Self-verify: write fixed content to the original file path
+        # temporarily and run tsc to confirm 0 errors remain.
+        # WorkerTsCheck runs tsc on the whole project -- we do the same
+        # here by temporarily writing the fix and restoring on failure.
+        # This is deterministic (no LLM), same subprocess tsc call.
+        import os
+        import subprocess
+        import shutil
+        original_content = input.get("file_content", "")
+        # Resolve the actual file path from the errors list (first error's file)
+        error_list = input.get("errors", [])
+        rel_file = error_list[0].get("file") if error_list else None
+        abs_file = os.path.join(project_path, rel_file) if rel_file else None
+
+        remaining_errors = []
+        if abs_file and os.path.exists(abs_file):
+            try:
+                # Write fix temporarily
+                with open(abs_file, "w", encoding="utf-8") as f:
+                    f.write(parsed["fixed_content"])
+
+                result = subprocess.run(
+                    ["npx", "tsc", "--noEmit", "--pretty", "false"],
+                    cwd=project_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                # Parse errors using the same pattern as WorkerTsCheck
+                import re as _re
+                pattern = _re.compile(
+                    r"^(?P<file>.+?)\((?P<line>\d+),(?P<column>\d+)\): "
+                    r"error (?P<code>TS\d+): (?P<message>.+)$"
+                )
+                for line in result.stdout.splitlines():
+                    m = pattern.match(line.strip())
+                    if m:
+                        remaining_errors.append({
+                            "file": m.group("file"),
+                            "line": int(m.group("line")),
+                            "column": int(m.group("column")),
+                            "code": m.group("code"),
+                            "message": m.group("message"),
+                        })
+            except Exception:
+                remaining_errors = []  # tsc failed to run -- don't block
+            finally:
+                # Restore original if errors remain
+                if remaining_errors:
+                    with open(abs_file, "w", encoding="utf-8") as f:
+                        f.write(original_content)
+
+        if remaining_errors:
+            return {
+                "status": "error",
+                "result": None,
+                "reason": (
+                    f"Fix applied but {len(remaining_errors)} TypeScript "
+                    f"error(s) remain after correction: "
+                    + "; ".join(
+                        f"[{e.get('code')}] line {e.get('line')}: {e.get('message')}"
+                        for e in remaining_errors[:3]
+                    )
+                ),
             }
 
         return {

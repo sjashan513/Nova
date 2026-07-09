@@ -217,6 +217,15 @@ class WorkerTsFix(BaseWorker):
                 for line in result.stdout.splitlines():
                     m = pattern.match(line.strip())
                     if m:
+                        # Only count errors in the file we just fixed --
+                        # tsc compiles the whole project, so other files
+                        # with pre-existing errors (missing @types/jest,
+                        # broken imports, etc.) would poison the result
+                        # and make self-verify reject a perfectly correct fix.
+                        error_file = os.path.normpath(m.group("file"))
+                        target_file = os.path.normpath(abs_file)
+                        if error_file != target_file:
+                            continue
                         remaining_errors.append({
                             "file": m.group("file"),
                             "line": int(m.group("line")),

@@ -12,3 +12,6 @@ __pycache__/*
 .env.example
 test_fixtures/*
 commits/*
+*/node_modules/
+*/out/*
+*/nova-vscode*

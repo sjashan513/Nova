@@ -14,6 +14,10 @@ step.
 
 Fase 3 addition: WorkerExecutionError. See its own docstring below for
 why it is a sibling of RetriesExhaustedError, not of StepExecutionError.
+
+Fase 4b addition: PlanAbortedError. See its own docstring below for
+why it is a sibling of RetriesExhaustedError and NOT of
+WorkerExecutionError.
 """
 
 from typing import List, Optional
@@ -137,3 +141,37 @@ class RetriesExhaustedError(ExecutionError):
             f"Last error: {attempts[-1].original_error if attempts else '(none)'}"
         )
         super().__init__(message, step_id=step_id)
+
+
+class PlanAbortedError(ExecutionError):
+    """
+    Fase 4b. Raised by tools/vscode.py::show_diff() when Jashan
+    explicitly rejects a proposed diff via the VSCode Diff Editor
+    (Ctrl+Shift+N).
+
+    Semantically distinct from both WorkerExecutionError and
+    RetriesExhaustedError:
+      - WorkerExecutionError: a technical failure — something went wrong
+        that the system could not resolve on its own.
+      - RetriesExhaustedError: a retry budget spent — the system tried
+        its best and ran out of attempts.
+      - PlanAbortedError: a conscious human decision — nothing failed,
+        nothing needs retrying. Jashan looked at the proposed change and
+        chose not to apply it. Retrying would be wrong by definition.
+
+    This is why the Director catches PlanAbortedError in a SEPARATE
+    except clause BEFORE the generic exception handler, sets
+    self.status = "ABORTED" (not "FAILED"), and never routes this
+    through execute_with_retry or execute_with_fallback. The distinction
+    between ABORTED and FAILED matters at the CLI level: FAILED means
+    "something broke, you may want to retry"; ABORTED means "you
+    stopped this, it is not a bug."
+
+    Carries only `message` — a plain string describing which file's
+    diff was rejected. No step_id at construction time (the tool does
+    not know its own step_id), so step_id is left as None and may be
+    enriched by the Director if needed in a future phase.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message, step_id=None)

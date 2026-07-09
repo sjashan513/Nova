@@ -114,9 +114,39 @@ class WorkerTsCheck(BaseWorker):
 
         project_path = get_project(project_name)["path"]
 
+        # If a specific file_path is provided, pass it directly to tsc
+        # instead of compiling the whole project. Two reasons:
+        #   1. Correctness — only errors for that file are returned,
+        #      no contamination from other files in the project.
+        #   2. Performance — on large repos, compiling everything just
+        #      to check one file is wasteful and slow.
+        # file_path must be absolute — the Planner always constructs it
+        # as <project.path>/<file>, never as a relative path.
+        # When no file_path is given, tsc compiles the full project as
+        # before — useful for whole-project health checks.
+        import os
+        file_path = input.get("file_path")
+        tsc_args = ["npx", "tsc", "--noEmit", "--pretty", "false"]
+        if file_path:
+            # Pass the file directly to tsc — it compiles only that file,
+            # ignoring tsconfig.json's include/exclude globs. This means
+            # tsc runs without the project's tsconfig, so we add the minimum
+            # flags to avoid false positives from missing lib definitions.
+            # --skipLibCheck silences errors in .d.ts files that aren't
+            # our concern here. --target ES2020 avoids "lib not found" errors.
+            tsc_args = [
+                "npx", "tsc",
+                "--noEmit",
+                "--pretty", "false",
+                "--skipLibCheck",
+                "--target", "ES2020",
+                "--strict",
+                file_path,
+            ]
+
         try:
             completed = subprocess.run(
-                ["npx", "tsc", "--noEmit", "--pretty", "false"],
+                tsc_args,
                 cwd=project_path,
                 capture_output=True,
                 text=True,

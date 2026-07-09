@@ -1,5 +1,5 @@
 """
-System prompt construction for the Planner (Kimi K2.6 via NIM).
+System prompt construction for the Planner (GLM-5.2 via NIM).
 
 Pulled out of planner.py into its own module so the prompt can be
 iterated on quickly without touching the HTTP/parsing logic that
@@ -24,13 +24,47 @@ def _build_registry_context() -> str:
     Serializes the full Tool + Worker catalogs into a plain-text block
     for the system prompt. The Planner reads this to know what Nova can
     do, pick exact valid names for Step.tool_or_worker, know exactly
-    what each worker needs in its input (required_input_keys), and know
-    exactly what field names each worker produces in its output
-    (output_keys) -- so $step_id.field references are always correct.
+    what each action/worker needs in its input (required_input_keys),
+    and know exactly what field names each action/worker produces in its
+    output (output_keys) -- so $step_id.field references are always correct.
+
+    Fase 4b: tools now also carry per-action required_input_keys and
+    output_keys in the YAML (under each action entry). This function
+    serializes them the same way it already did for workers.
     """
     lines: List[str] = ["AVAILABLE TOOLS (primitive, no LLM):"]
     for name, entry in TOOLS_BY_NAME.items():
         lines.append(f"  - {name}: {entry.get('description', '')}")
+
+        for action in entry.get("actions", []):
+            action_name = action.get("name", "")
+            lines.append(f"    action: {action_name}")
+
+            required_keys = action.get("required_input_keys", [])
+            if required_keys:
+                lines.append(
+                    f"      Required input keys (must appear in this step's \"input\"):")
+                for key in required_keys:
+                    parts = str(key).split("#", 1)
+                    key_name = parts[0].strip()
+                    hint = parts[1].strip() if len(parts) > 1 else None
+                    if hint:
+                        lines.append(f"        - {key_name}: {hint}")
+                    else:
+                        lines.append(f"        - {key_name}")
+
+            output_keys = action.get("output_keys", [])
+            if output_keys:
+                lines.append(
+                    f"      Output keys (reference as \"$<this_step_id>.<key>\" in later steps):")
+                for key in output_keys:
+                    parts = str(key).split("#", 1)
+                    key_name = parts[0].strip()
+                    hint = parts[1].strip() if len(parts) > 1 else None
+                    if hint:
+                        lines.append(f"        - {key_name}: {hint}")
+                    else:
+                        lines.append(f"        - {key_name}")
 
     lines.append("")
     lines.append("AVAILABLE WORKERS (one job each):")
@@ -42,8 +76,6 @@ def _build_registry_context() -> str:
             lines.append(
                 f"    Required input keys (must appear in this step's \"input\"):")
             for key in required_keys:
-                # Inline comments in the YAML value (after "#") carry
-                # the hint about which prior step produces each key.
                 parts = str(key).split("#", 1)
                 key_name = parts[0].strip()
                 hint = parts[1].strip() if len(parts) > 1 else None
@@ -70,14 +102,13 @@ def _build_registry_context() -> str:
 
 def _build_project_context() -> str:
     """
-    Loads project_registry.yaml verbatim as text context. This is
-    what the "project" rule below points back to -- Kimi must copy a
-    name EXACTLY from this list into any worker_* step's input, never
-    invent or rephrase one. See
+    Loads project_registry.yaml verbatim as text context.
+    This is what the "project" rule below points back to -- the Planner
+    must copy a name EXACTLY from this list into any worker_* step's
+    input, never invent or rephrase one. See
     core/planner/validators.py::validate_step_projects_exist /
     core/domain/exceptions/contract_errors.py::InvalidProjectError for
-    the contract check that catches it if this rule is violated
-    anyway.
+    the contract check that catches it if this rule is violated anyway.
     """
     with open(_PROJECT_REGISTRY_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -126,20 +157,22 @@ def _build_skills_context() -> str:
 # function today", separate from the Tool/Worker Registry (which lists
 # everything that EXISTS as a catalog entry, regardless of whether it
 # has a real implementation behind it yet). The registry alone is not
-# enough to keep Kimi from picking a real, valid, registered worker
-# name that nonetheless has no dispatch function in
+# enough to keep the Planner from picking a real, valid, registered
+# worker name that nonetheless has no dispatch function in
 # core/director/director_instance.py's _TOOL_DISPATCH yet -- that would
 # pass contract validation (the name IS registered) but fail at
-# execution with a confusing error, instead of Kimi simply not
+# execution with a confusing error, instead of the Planner simply not
 # proposing it in the first place.
 #
 # Update this list as each entry gets a real implementation -- when
 # core/director/director_instance.py's _TOOL_DISPATCH grows a new
 # entry, remove the matching line here. The two lists should always
-# describe the same reality; this one is what tells Kimi about it.
+# describe the same reality; this one is what tells the Planner about it.
 IMPLEMENTED_TOOLS_AND_WORKERS = [
     "filesystem (actions: read, write, list)",
     "terminal (action: run)",
+    # Fase 4b -- diff gate, replaces filesystem.write for source files
+    "vscode (action: show_diff)",
     "worker_ts_check",
     "worker_ts_fix",
     "worker_jsdoc",
@@ -193,11 +226,15 @@ when the Director tries to execute it -- if the task needs something \
 not in that list, ask a clarification question explaining what's \
 missing instead of proposing a plan that would fail.
 - Worker names always start with "worker_". Tool names never do.
-- "action" is REQUIRED when "tool_or_worker" is a primitive tool with \
-multiple operations: for "filesystem", use "read", "write", or "list". \
-For "terminal", use "run". Workers do not need "action" -- leave it as \
-an empty string "" for any worker_* step, since the worker name itself \
-already specifies the one thing it does.
+- "action" is REQUIRED when "tool_or_worker" is a primitive tool: for \
+"filesystem", use "read", "write", or "list". For "terminal", use "run". \
+For "vscode", use "show_diff". Workers do not need "action" -- leave it \
+as an empty string "" for any worker_* step, since the worker name \
+itself already specifies the one thing it does.
+- NEVER use "filesystem.write" to modify source files. Always use \
+"vscode" with action "show_diff" as the final step that proposes a \
+change to an existing file. filesystem.write is only valid for writing \
+non-source files (e.g. generated test files that did not exist before).
 - For "terminal" steps, "input" MUST have a "command" key (the base \
 executable, e.g. "cat", "git", "npm" -- never combined with arguments \
 into one string) and an "args" key (a list of separate argument \

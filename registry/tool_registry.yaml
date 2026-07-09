@@ -2,15 +2,64 @@ tools:
     - name: "filesystem"
       description: "Read, write, and navigate operations in the local file system."
       module: "tools.filesystem"
+      actions:
+        - name: "read"
+          required_input_keys:
+            - path   # absolute path to the file to read
+          output_keys:
+            - content   # full text content of the file
+        - name: "write"
+          required_input_keys:
+            - path     # absolute path to the file to write
+            - content  # full text content to write -- pass "$<prior_step>.<content_key>" here
+          output_keys:
+            - bytes_written  # int, number of bytes written
+        - name: "list"
+          required_input_keys:
+            - path   # absolute path to the directory to list
+          output_keys:
+            - entries  # list of filenames in the directory
+
     - name: "terminal"
       description: "Execute commands in the terminal."
       module: "tools.terminal"
+      actions:
+        - name: "run"
+          required_input_keys:
+            - command  # the shell command to run as a string -- do NOT chain with &&, use separate steps
+            - args     # list of string arguments to pass to the command
+          output_keys:
+            - stdout    # full standard output as string
+            - stderr    # full standard error as string
+            - exit_code # int, 0 means success
+
     - name: "git"
       description: "Local and remote version control operations."
       module: "tools.git"
+      actions:
+        - name: "status"
+          required_input_keys:
+            - path   # absolute path to the git repository root
+          output_keys:
+            - status  # git status output as string
+        - name: "commit"
+          required_input_keys:
+            - path     # absolute path to the git repository root
+            - message  # the commit message string -- pass "$<commit_msg_step>.message" here
+          output_keys:
+            - sha  # the commit SHA string
+
     - name: "vscode"
-      description: "Integration to control the VS Code interface."
+      description: "Integration to control the VS Code interface. show_diff is the ONLY way Nova proposes code changes -- never use filesystem.write to modify source files directly."
       module: "tools.vscode"
+      actions:
+        - name: "show_diff"
+          required_input_keys:
+            - file_path        # absolute path to the file being modified -- must already exist
+            - proposed_content # the full new content to propose -- pass "$<prior_step>.<content_key>" here
+          output_keys:
+            - decision  # always "accepted" -- if rejected, plan is ABORTED before this step returns
+            - applied   # always True -- the file has been written to disk
 
 workers:
     # --- CODING domain ---
@@ -20,6 +69,7 @@ workers:
       requires_model: false
       required_input_keys:
         - project
+        - file_path  # (optional) path to a specific file -- if provided, only errors for that file are returned. Relative to project root or absolute.
       output_keys:
         - errors        # list of error dicts: {file, line, column, code, message} -- pass "$<this_step>.errors" to worker_ts_fix
         - error_count   # int, always len(errors)

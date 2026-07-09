@@ -66,11 +66,12 @@ from core.domain.models import Plan, Step
 from core.domain.exceptions import (
     PlanContractErrorGroup,
     RetriesExhaustedError,
+    PlanAbortedError,
 )
 from core.director.dag import validate_dag, validate_input_references, build_levels
 from core.director.context import resolve_step_input
 from core.director.error_policy import execute_with_retry, execute_with_fallback
-from tools import filesystem, terminal
+from tools import filesystem, terminal, vscode
 from workers.coding.worker_ts_check import WorkerTsCheck
 from workers.coding.worker_ts_fix import WorkerTsFix
 from workers.coding.worker_jsdoc import WorkerJsdoc
@@ -79,7 +80,7 @@ from workers.coding.worker_commit_msg import WorkerCommitMsg
 from workers.coding.worker_diff_summary import WorkerDiffSummary
 from registry.worker_registry import get_worker_default_model
 
-PlanStatus = Literal["PENDING", "RUNNING", "DONE", "FAILED"]
+PlanStatus = Literal["PENDING", "RUNNING", "DONE", "FAILED", "ABORTED"]
 
 # Same "worker_" naming convention already used in
 # core/planner/validators.py to distinguish workers from primitive
@@ -120,6 +121,7 @@ _TOOL_DISPATCH: Dict[tuple, Callable[..., Dict[str, Any]]] = {
     ("filesystem", "write"): filesystem.write,
     ("filesystem", "list"): filesystem.list_dir,
     ("terminal", "run"): terminal.run,
+    ("vscode", "show_diff"): vscode.show_diff,
     ("worker_ts_check", ""): WorkerTsCheck().run,
     ("worker_ts_fix", ""): WorkerTsFix().run,
     ("worker_jsdoc", ""): WorkerJsdoc().run,
@@ -214,13 +216,25 @@ class DirectorInstance:
             }
 
             first_error: Optional[RetriesExhaustedError] = None
+            abort_error: Optional[PlanAbortedError] = None
             for future, step in futures.items():
                 try:
                     result = future.result()
                     self.context[step.id] = result
+                except PlanAbortedError as e:
+                    # Conscious human decision — not a bug, not retried.
+                    # Takes priority over any RetriesExhaustedError in the
+                    # same level (unlikely since show_diff steps are never
+                    # parallelized with other critical steps, but defensive).
+                    if abort_error is None:
+                        abort_error = e
                 except RetriesExhaustedError as e:
                     if first_error is None:
                         first_error = e
+
+            if abort_error is not None:
+                self.status = "ABORTED"
+                raise abort_error
 
             if first_error is not None:
                 self.status = "FAILED"

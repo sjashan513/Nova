@@ -1,0 +1,45 @@
+{
+  "name": "nova-vscode",
+  "displayName": "Nova",
+  "description": "Nova AI assistant integration for VSCode — diff gate and editor state.",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "nova.acceptDiff",
+        "title": "Nova: Accept Diff"
+      },
+      {
+        "command": "nova.rejectDiff",
+        "title": "Nova: Reject Diff"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "nova.acceptDiff",
+        "key": "ctrl+shift+y",
+        "when": "isInDiffEditor"
+      },
+      {
+        "command": "nova.rejectDiff",
+        "key": "ctrl+shift+n",
+        "when": "isInDiffEditor"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.0.0"
+  }
+}

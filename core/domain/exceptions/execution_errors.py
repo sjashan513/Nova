@@ -175,3 +175,48 @@ class PlanAbortedError(ExecutionError):
 
     def __init__(self, message: str):
         super().__init__(message, step_id=None)
+
+
+class AssumesFailedError(ExecutionError):
+    """
+    Fase 5. Raised by core/director/comparator.py::check() when one or
+    more implicit_assumes for a step evaluate to False before the step
+    is dispatched.
+
+    Semantically distinct from all existing ExecutionError subtypes:
+      - StepExecutionError:  a tool/worker call attempted and failed.
+      - WorkerExecutionError: a worker exhausted its own internal policy.
+      - RetriesExhaustedError: the Director's retry budget ran out.
+      - PlanAbortedError: a conscious human rejection (diff gate).
+      - AssumesFailedError: the world no longer matches what the Planner
+        assumed when it generated the plan. The step was never attempted.
+        Nothing failed — the precondition for attempting it was not met.
+
+    This is why the Director catches AssumesFailedError in a SEPARATE
+    except clause BEFORE RetriesExhaustedError and PlanAbortedError,
+    sets self.status = "PAUSED" (not "FAILED", not "ABORTED"), and
+    never routes this through execute_with_retry or
+    execute_with_fallback. Retrying the same step against the same
+    broken precondition is pointless — a human decision is required
+    first (retry after fixing the precondition | skip | abort).
+
+    The distinction between PAUSED, ABORTED, and FAILED matters at the
+    CLI level:
+      FAILED  → something broke, may be transient, consider retrying.
+      ABORTED → you stopped this consciously, it is not a bug.
+      PAUSED  → the world changed since planning; your input is needed
+                before execution can continue.
+
+    Carries `step_id` and `failures` — the list of AssumeFailure
+    dataclasses from the Comparador, each with op, reason, and the raw
+    assume dict. The CLI uses these to present exactly what diverged
+    and where, without having to re-evaluate anything.
+    """
+
+    def __init__(self, step_id: str, failures: list):
+        self.failures = failures
+        reasons = "; ".join(f.reason for f in failures)
+        message = (
+            f"Step '{step_id}' cannot run — precondition(s) not met: {reasons}"
+        )
+        super().__init__(message, step_id=step_id)

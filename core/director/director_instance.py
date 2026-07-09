@@ -15,6 +15,15 @@ Fase 2 scope: a single instance, single Plan, primitive Steps only
 worktree/container isolation -- those are Fase 8. This class assumes
 it is the only Director running.
 
+Fase 5 addition: Comparador pre-execution check. Before dispatching
+any step, _execute_step now calls comparator.check() against the
+step's implicit_assumes (declared in tool_registry.yaml, never by the
+Planner). If any assume fails, AssumesFailedError is raised -- the
+Plan moves to PAUSED, never FAILED. PAUSED means "the world changed
+since planning; human input required." The Director receives registry
+and projects at construction time so the Comparador can resolve
+project.path references without touching global state.
+
 Fase 3 addition: real Worker steps. Two things changed here, and only
 here -- no other module needed to change for this:
 
@@ -67,7 +76,9 @@ from core.domain.exceptions import (
     PlanContractErrorGroup,
     RetriesExhaustedError,
     PlanAbortedError,
+    AssumesFailedError,
 )
+from core.director import comparator
 from core.director.dag import validate_dag, validate_input_references, build_levels
 from core.director.context import resolve_step_input
 from core.director.error_policy import execute_with_retry, execute_with_fallback
@@ -80,7 +91,8 @@ from workers.coding.worker_commit_msg import WorkerCommitMsg
 from workers.coding.worker_diff_summary import WorkerDiffSummary
 from registry.worker_registry import get_worker_default_model
 
-PlanStatus = Literal["PENDING", "RUNNING", "DONE", "FAILED", "ABORTED"]
+PlanStatus = Literal["PENDING", "RUNNING",
+                     "DONE", "FAILED", "ABORTED", "PAUSED"]
 
 # Same "worker_" naming convention already used in
 # core/planner/validators.py to distinguish workers from primitive
@@ -139,11 +151,23 @@ class DirectorInstance:
     Plan" rule).
     """
 
-    def __init__(self, plan: Plan, plan_id: Optional[str] = None):
+    def __init__(
+        self,
+        plan: Plan,
+        plan_id: Optional[str] = None,
+        registry: Optional[Dict] = None,
+        projects: Optional[Dict] = None,
+    ):
         self.plan = plan
         self.plan_id = plan_id
         self.context: Dict[str, Dict[str, Any]] = {}
         self.status: PlanStatus = "PENDING"
+        # Fase 5: passed to comparator.check() before each step dispatch.
+        # Optional for backwards compatibility with existing tests that
+        # construct DirectorInstance without these -- Comparador is a
+        # no-op when registry is None (no implicit_assumes to evaluate).
+        self._registry: Dict = registry or {}
+        self._projects: Dict = projects or {}
 
     def run(self) -> Dict[str, Any]:
         """
@@ -217,15 +241,23 @@ class DirectorInstance:
 
             first_error: Optional[RetriesExhaustedError] = None
             abort_error: Optional[PlanAbortedError] = None
+            paused_error: Optional[AssumesFailedError] = None
             for future, step in futures.items():
                 try:
                     result = future.result()
                     self.context[step.id] = result
+                except AssumesFailedError as e:
+                    # World diverged from plan — not a bug, not retried.
+                    # Human input required before execution can continue.
+                    # Takes priority over RetriesExhaustedError (a diverged
+                    # precondition is a different class of problem than a
+                    # transient failure), but yields to PlanAbortedError
+                    # (an explicit human stop always wins).
+                    if paused_error is None:
+                        paused_error = e
                 except PlanAbortedError as e:
                     # Conscious human decision — not a bug, not retried.
-                    # Takes priority over any RetriesExhaustedError in the
-                    # same level (unlikely since show_diff steps are never
-                    # parallelized with other critical steps, but defensive).
+                    # Takes priority over everything else.
                     if abort_error is None:
                         abort_error = e
                 except RetriesExhaustedError as e:
@@ -235,6 +267,10 @@ class DirectorInstance:
             if abort_error is not None:
                 self.status = "ABORTED"
                 raise abort_error
+
+            if paused_error is not None:
+                self.status = "PAUSED"
+                raise paused_error
 
             if first_error is not None:
                 self.status = "FAILED"
@@ -292,6 +328,25 @@ class DirectorInstance:
 
         t0 = time.monotonic()
         resolved_input = resolve_step_input(step, self.context)
+
+        # Fase 5: Comparador — evaluate implicit_assumes before dispatch.
+        # Runs after input resolution so assumes that reference $step_id.field
+        # values (e.g. FILE_UNCHANGED checking content read by a prior step)
+        # can resolve against the already-populated context.
+        # No-op when self._registry is empty (backwards compat with tests).
+        if self._registry:
+            result = comparator.check(
+                step=step,
+                plan=self.plan,
+                context=self.context,
+                registry=self._registry,
+                projects=self._projects,
+            )
+            if not result.passed:
+                raise AssumesFailedError(
+                    step_id=step.id,
+                    failures=result.failed_assumes,
+                )
 
         dispatch_key = (step.tool_or_worker, step.action)
         dispatch_fn = _TOOL_DISPATCH.get(dispatch_key)

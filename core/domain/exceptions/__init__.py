@@ -126,7 +126,8 @@ from core.domain.exceptions.execution_errors import (
     StepExecutionError,
     WorkerExecutionError,
     RetriesExhaustedError,
-    PlanAbortedError
+    PlanAbortedError,
+    AssumesFailedError,
 )
 
 from core.domain.exceptions.divergence_errors import DivergenceError
@@ -150,5 +151,6 @@ __all__ = [
     "WorkerExecutionError",
     "RetriesExhaustedError",
     "PlanAbortedError",
+    "AssumesFailedError",
     "DivergenceError",
 ]

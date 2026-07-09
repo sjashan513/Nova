@@ -8,17 +8,28 @@ tools:
             - path   # absolute path to the file to read
           output_keys:
             - content   # full text content of the file
+          implicit_assumes:
+            - op: FILE_EXISTS
+              path: input.path
+
         - name: "write"
           required_input_keys:
             - path     # absolute path to the file to write
             - content  # full text content to write -- pass "$<prior_step>.<content_key>" here
           output_keys:
             - bytes_written  # int, number of bytes written
+          implicit_assumes:
+            - op: DIR_EXISTS
+              path: input.path  # Comparador extrae el directorio padre con Path(path).parent
+
         - name: "list"
           required_input_keys:
             - path   # absolute path to the directory to list
           output_keys:
             - entries  # list of filenames in the directory
+          implicit_assumes:
+            - op: DIR_EXISTS
+              path: input.path
 
     - name: "terminal"
       description: "Execute commands in the terminal."
@@ -32,6 +43,9 @@ tools:
             - stdout    # full standard output as string
             - stderr    # full standard error as string
             - exit_code # int, 0 means success
+          implicit_assumes:
+            - op: COMMAND_EXISTS
+              command: input.command
 
     - name: "git"
       description: "Local and remote version control operations."
@@ -42,12 +56,19 @@ tools:
             - path   # absolute path to the git repository root
           output_keys:
             - status  # git status output as string
+          implicit_assumes:
+            - op: IS_GIT_REPO
+              path: input.path
+
         - name: "commit"
           required_input_keys:
             - path     # absolute path to the git repository root
             - message  # the commit message string -- pass "$<commit_msg_step>.message" here
           output_keys:
             - sha  # the commit SHA string
+          implicit_assumes:
+            - op: IS_GIT_REPO
+              path: input.path
 
     - name: "vscode"
       description: "Integration to control the VS Code interface. show_diff is the ONLY way Nova proposes code changes -- never use filesystem.write to modify source files directly."
@@ -60,6 +81,12 @@ tools:
           output_keys:
             - decision  # always "accepted" -- if rejected, plan is ABORTED before this step returns
             - applied   # always True -- the file has been written to disk
+          implicit_assumes:
+            - op: FILE_EXISTS
+              path: input.file_path
+            - op: SERVICE_REACHABLE
+              host: localhost
+              port: 3333
 
 workers:
     # --- CODING domain ---
@@ -73,6 +100,13 @@ workers:
       output_keys:
         - errors        # list of error dicts: {file, line, column, code, message} -- pass "$<this_step>.errors" to worker_ts_fix
         - error_count   # int, always len(errors)
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
+        # FILE_EXISTS solo si file_path está presente en el input del step concreto.
+        # El Comparador lo evalúa condicionalmente: si input contiene "file_path" → FILE_EXISTS(input.file_path)
+        - op: FILE_EXISTS_IF_PRESENT
+          path: input.file_path
 
     - name: "worker_ts_fix"
       description: "Fixes TypeScript errors with minimal changes only."
@@ -86,6 +120,14 @@ workers:
       output_keys:
         - fixed_content  # the complete corrected file -- pass "$<this_step>.fixed_content" to filesystem.write
         - changes_made   # list of short descriptions of each change applied
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
+        # FILE_UNCHANGED solo si file_content referencia un filesystem.read.
+        # Si referencia un worker_* (e.g. $s3.fixed_content), se omite silenciosamente.
+        - op: FILE_UNCHANGED
+          ref_step: input.file_content   # resuelve "$s1.content" → step s1
+          ref_field: content             # campo del result de s1 que contiene el texto
 
     - name: "worker_jsdoc"
       description: "Adds JSDoc to exported symbols. Never touches logic."
@@ -98,6 +140,13 @@ workers:
       output_keys:
         - documented_content  # the complete file with JSDoc added -- pass "$<this_step>.documented_content" to filesystem.write
         - symbols_documented  # list of symbol names that received JSDoc
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
+        # FILE_UNCHANGED omitido si file_content viene de un worker_* -- ver regla del Comparador
+        - op: FILE_UNCHANGED
+          ref_step: input.file_content
+          ref_field: content
 
     - name: "worker_commit_msg"
       description: "Generates conventional commit messages from a diff."
@@ -109,6 +158,12 @@ workers:
         - diff  # full git diff text -- run "git diff" with terminal.run first, then pass "$<terminal_step>.stdout"
       output_keys:
         - message  # the conventional commit message string
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
+        - op: NOT_EMPTY
+          ref_step: input.diff   # resuelve "$s1.stdout" → step s1
+          ref_field: stdout
 
     - name: "worker_diff_summary"
       description: "Plain language summary of a diff."
@@ -120,6 +175,12 @@ workers:
         - diff  # full git diff text -- run "git diff" with terminal.run first, then pass "$<terminal_step>.stdout"
       output_keys:
         - summary  # plain-language prose summary of the diff
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
+        - op: NOT_EMPTY
+          ref_step: input.diff
+          ref_field: stdout
 
     - name: "worker_code_review"
       description: "Structured code review issues by severity."
@@ -131,6 +192,12 @@ workers:
         - file_content  # full text of the file to review -- read with filesystem.read first, then pass "$<read_step>.content"
       output_keys:
         - issues  # list of issue dicts: {severity, line, message}
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
+        - op: FILE_UNCHANGED
+          ref_step: input.file_content
+          ref_field: content
 
     - name: "worker_refactor"
       description: "Applies one refactor pattern per call."
@@ -144,6 +211,12 @@ workers:
       output_keys:
         - refactored_content  # the complete refactored file -- pass "$<this_step>.refactored_content" to filesystem.write
         - changes_made        # list of short descriptions of each change applied
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
+        - op: FILE_UNCHANGED
+          ref_step: input.file_content
+          ref_field: content
 
     - name: "worker_test_writer"
       description: "Language-agnostic test generation."
@@ -156,6 +229,12 @@ workers:
       output_keys:
         - test_content  # the complete test file content -- pass "$<this_step>.test_content" to filesystem.write
         - test_count    # int, model's self-reported count of test cases written
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
+        - op: FILE_UNCHANGED
+          ref_step: input.file_content
+          ref_field: content
 
     # - name: "worker_test_runner"
     #   description: "Runs tests and returns structured results. No LLM."
@@ -178,6 +257,9 @@ workers:
         - success     # bool
         - exit_code   # int
         - output      # full build output as string
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
 
     - name: "worker_dependency_check"
       description: "Checks for outdated or vulnerable dependencies. No LLM."
@@ -186,8 +268,11 @@ workers:
       required_input_keys:
         - project
       output_keys:
-        - outdated      # list of outdated dependency dicts
+        - outdated         # list of outdated dependency dicts
         - vulnerabilities  # list of vulnerability dicts
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
 
     # --- QA domain ---
     - name: "worker_qa_consolidate"
@@ -200,6 +285,9 @@ workers:
         - versions  # list of file content strings to merge
       output_keys:
         - merged_content  # the complete merged file -- pass "$<this_step>.merged_content" to filesystem.write
+      implicit_assumes:
+        - op: DIR_EXISTS
+          path: project.path
 
     # --- ENVIRONMENT domain ---
     - name: "worker_env_snapshot"
@@ -213,3 +301,7 @@ workers:
         - branch         # current git branch
         - open_tabs      # list of open file paths
         - language       # language of the active file
+      implicit_assumes:
+        - op: SERVICE_REACHABLE
+          host: localhost
+          port: 3333

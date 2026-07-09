@@ -34,6 +34,7 @@ from core.domain.exceptions import (
     PlannerError,
     PlanContractError,
     RetriesExhaustedError,
+    AssumesFailedError,
 )
 
 # Values del contexto truncados a este límite -- suficiente para ver
@@ -132,45 +133,76 @@ def _print_retries_exhausted(e: RetriesExhaustedError) -> None:
               f"{attempt.original_error}")
 
 
-def _execute_plan(plan) -> None:
+def _print_assumes_failed(e: AssumesFailedError) -> None:
+    """
+    Formatea AssumesFailedError mostrando qué precondición falló y por qué.
+    PAUSED ≠ FAILED: nada se rompió, el mundo cambió desde la planificación.
+    El usuario decide si reintentar (tras corregir la precondición), saltar
+    el step, o abortar el plan completo.
+    """
+    print(
+        f"\n[PAUSED] El plan se pausó antes de ejecutar el step '{e.step_id}'.")
+    print(f"  La(s) siguiente(s) precondición(es) no se cumplieron:\n")
+    for f in e.failures:
+        print(f"  [{f.op}] {f.reason}")
+    print(f"\n  El plan fue generado contra un estado del mundo que ya no es válido.")
+    print(f"  Opciones: corrige la precondición y reintenta la tarea, o cancela.")
+
+
+def _execute_plan(plan, registry: dict, projects: dict) -> None:
     """
     Instancia un DirectorInstance fresco para este plan y lo ejecuta.
     Un DirectorInstance por plan, nunca reutilizado -- ver
     director_instance.py's module docstring ("Una instancia, un Plan").
 
+    Fase 5: recibe registry y projects para pasárselos al Director, que
+    los inyecta en el Comparador antes de cada dispatch. Sin ellos el
+    Comparador es un no-op (backwards compat con tests existentes).
+
     Errores manejados aquí:
+      - AssumesFailedError: una precondición implícita falló antes de
+        ejecutar un step. El plan quedó PAUSED. Nada se intentó, nada
+        se rompió -- el mundo cambió desde la planificación.
       - RetriesExhaustedError: un step agotó su presupuesto de reintentos
         (Nivel 1 + Nivel 2 si había fallback_model). El plan quedó FAILED.
+      - PlanAbortedError: Jashan rechazó un diff. El plan quedó ABORTED.
       - PlanContractErrorGroup: el DAG o las referencias de input son
-        inválidas -- el Director lo detecta antes de ejecutar cualquier
-        step. No debería ocurrir si el Iniciador hizo su trabajo, pero
-        se captura como safety net (el mismo handler que ya existe para
-        el caso del Iniciador).
+        inválidas -- safety net, no debería ocurrir si el Iniciador hizo
+        su trabajo.
 
     Cualquier otra excepción no capturada aquí sube al handler genérico
     del main loop (Exception) -- no se silencia nada.
     """
-    director = DirectorInstance(plan)
+    from core.domain.exceptions import PlanAbortedError
+    director = DirectorInstance(plan, registry=registry, projects=projects)
     try:
         result = director.run()
         _print_execution_result(result)
+    except AssumesFailedError as e:
+        _print_assumes_failed(e)
     except RetriesExhaustedError as e:
         _print_retries_exhausted(e)
+    except PlanAbortedError as e:
+        print(f"\n[ABORTED] Diff rechazado. El plan fue cancelado. {e}")
     except PlanContractErrorGroup as e:
-        # Safety net -- el Iniciador ya validó el contrato, pero si el
-        # DAG tiene un problema que validate_plan_contract no cubre
-        # (validate_dag lo detecta en el Director), este handler evita
-        # que el error suba sin contexto al main loop genérico.
         print(f"\n[PlanContractErrorGroup] El Director rechazó el plan "
               f"antes de ejecutar nada. {len(e.errors)} error(s):")
         _print_contract_error_group(e)
 
 
 def main():
-    print("Nova CLI v1.0 - Initialized (Phase 4: Planner + Director connected)")
+    print("Nova CLI v1.0 - Initialized (Phase 5: Comparador activo)")
     print("Type 'exit' or 'quit' to terminate.")
 
     iniciador = Iniciador()
+
+    # Cargamos registry y projects una sola vez al arrancar -- son
+    # inmutables en runtime, no hay razón para recargarlos por plan.
+    import yaml
+    with open("registry/tool_registry.yaml", encoding="utf-8") as f:
+        registry = yaml.safe_load(f)
+    with open("registry/project_registry.yaml", encoding="utf-8") as f:
+        projects = yaml.safe_load(f) or {}
 
     while True:
         try:
@@ -215,7 +247,8 @@ def main():
             _print_plan(response["plan"])
 
             if _confirm_execution():
-                _execute_plan(response["plan"])
+                _execute_plan(response["plan"],
+                              registry=registry, projects=projects)
             else:
                 print("Ejecución cancelada.")
 

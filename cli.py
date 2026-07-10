@@ -36,11 +36,22 @@ from core.domain.exceptions import (
     RetriesExhaustedError,
     AssumesFailedError,
 )
+from memory.wal.wal_reader import WALReader
 
 # Values del contexto truncados a este límite -- suficiente para ver
 # qué devolvió cada step sin que el terminal explote con el contenido
 # completo de un fichero TypeScript de 500 líneas.
 _CONTEXT_VALUE_TRUNCATE = 300
+
+
+def _recover_wal() -> None:
+    r = WALReader()
+    pending = list(r.unprocessed())
+    if pending:
+        print(
+            f"[WAL] {len(pending)} evento(s) no procesado(s) detectado(s) al arrancar:")
+        for e in pending:
+            print(f"  - {e['worker']} / {e['project']} / ts={e['ts']}")
 
 
 def _print_plan(plan) -> None:
@@ -193,7 +204,7 @@ def _execute_plan(plan, registry: dict, projects: dict) -> None:
 def main():
     print("Nova CLI v1.0 - Initialized (Phase 5: Comparador activo)")
     print("Type 'exit' or 'quit' to terminate.")
-
+    _recover_wal()
     iniciador = Iniciador()
 
     # Cargamos registry y projects una sola vez al arrancar -- son

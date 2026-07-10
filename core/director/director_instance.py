@@ -89,45 +89,18 @@ from workers.coding.worker_jsdoc import WorkerJsdoc
 from workers.coding.worker_test_writer import WorkerTestWriter
 from workers.coding.worker_commit_msg import WorkerCommitMsg
 from workers.coding.worker_diff_summary import WorkerDiffSummary
-from registry.worker_registry import get_worker_default_model
+from registry.worker_registry import get_worker_default_model, WORKERS_BY_NAME
+from memory.wal.wal_writer import WALWriter
+
+_wal = WALWriter()
 
 PlanStatus = Literal["PENDING", "RUNNING",
                      "DONE", "FAILED", "ABORTED", "PAUSED"]
 
-# Same "worker_" naming convention already used in
-# core/planner/validators.py to distinguish workers from primitive
-# tools. Duplicated here rather than imported -- this is a tiny
-# string-prefix convention, not a shared piece of logic; importing it
-# would couple director/ to planner/ for one constant, which the
-# dependency direction in NOVA_CLI_MVP_ROADMAP.md §0.2 doesn't call
-# for.
 _LOG_LOCK = threading.Lock()
 
 _WORKER_PREFIX = "worker_"
 
-# Maps (tool_or_worker, action) to the real callable that performs it.
-# tool_or_worker alone is not enough to dispatch -- the registry only
-# ever registers "filesystem" or "terminal" as tool names (see
-# registry/tool_registry.yaml), never "filesystem.read" -- so `action`
-# (Step.action) is what distinguishes filesystem.read from
-# filesystem.write from filesystem.list. Worker entries use "" as their
-# action (a worker_ts_fix step IS the action -- see Step.action's
-# docstring) -- e.g. ("worker_ts_fix", "") maps to that worker's
-# BaseWorker.run.
-#
-# Fase 3: the 6 coding workers built this session are registered here
-# AND in core/planner/planner_prompt.py's IMPLEMENTED_TOOLS_AND_WORKERS
-# -- same commit, per NOVA_PENDIENTE_POST_FASE2.md §3.5: these two
-# lists must never drift out of sync, since a mismatch produces a
-# confusing runtime error instead of Kimi simply not proposing
-# something that has no real dispatch behind it yet.
-#
-# Each entry is `.run` (BaseWorker's concrete wrapper), never
-# `.execute` directly -- `.run` is what enforces the WorkerOutput
-# contract and performs the status -> exception translation
-# (workers/base.py). Dispatching to `.execute` would skip that
-# entirely and leak a raw WorkerOutput dict (or worse, an unhandled
-# status: "error" case) straight into _execute_step.
 _TOOL_DISPATCH: Dict[tuple, Callable[..., Dict[str, Any]]] = {
     ("filesystem", "read"): filesystem.read,
     ("filesystem", "write"): filesystem.write,
@@ -162,10 +135,6 @@ class DirectorInstance:
         self.plan_id = plan_id
         self.context: Dict[str, Dict[str, Any]] = {}
         self.status: PlanStatus = "PENDING"
-        # Fase 5: passed to comparator.check() before each step dispatch.
-        # Optional for backwards compatibility with existing tests that
-        # construct DirectorInstance without these -- Comparador is a
-        # no-op when registry is None (no implicit_assumes to evaluate).
         self._registry: Dict = registry or {}
         self._projects: Dict = projects or {}
 
@@ -247,17 +216,9 @@ class DirectorInstance:
                     result = future.result()
                     self.context[step.id] = result
                 except AssumesFailedError as e:
-                    # World diverged from plan — not a bug, not retried.
-                    # Human input required before execution can continue.
-                    # Takes priority over RetriesExhaustedError (a diverged
-                    # precondition is a different class of problem than a
-                    # transient failure), but yields to PlanAbortedError
-                    # (an explicit human stop always wins).
                     if paused_error is None:
                         paused_error = e
                 except PlanAbortedError as e:
-                    # Conscious human decision — not a bug, not retried.
-                    # Takes priority over everything else.
                     if abort_error is None:
                         abort_error = e
                 except RetriesExhaustedError as e:
@@ -311,13 +272,6 @@ class DirectorInstance:
              two models exist; it just reads "model" from its own
              input like any other field.
         """
-        # --- Step execution log (Fase 4) ---
-        # Print timestamp + step label before and after each step so
-        # the terminal is never a blank screen during execution.
-        # Uses a threading.Lock to avoid interleaved output when two
-        # steps in the same level run in parallel and both try to print
-        # at the same time -- the lock is module-level so all instances
-        # share it, which is fine: it's only held for a single print().
         label = (
             f"{step.tool_or_worker}"
             + (f".{step.action}" if step.action else "")
@@ -329,11 +283,6 @@ class DirectorInstance:
         t0 = time.monotonic()
         resolved_input = resolve_step_input(step, self.context)
 
-        # Fase 5: Comparador — evaluate implicit_assumes before dispatch.
-        # Runs after input resolution so assumes that reference $step_id.field
-        # values (e.g. FILE_UNCHANGED checking content read by a prior step)
-        # can resolve against the already-populated context.
-        # No-op when self._registry is empty (backwards compat with tests).
         if self._registry:
             result = comparator.check(
                 step=step,
@@ -361,11 +310,6 @@ class DirectorInstance:
 
         is_worker_step = step.tool_or_worker.startswith(_WORKER_PREFIX)
 
-        # Fase 4: modelo inyectado por el Director, no por el Planner.
-        # Si step.model no fue declarado explícitamente en el plan, lo
-        # resolvemos aquí desde el registry (default_model). El Planner
-        # nunca necesita saber qué modelo usar -- esa es una decisión
-        # de ejecución, no de planificación.
         effective_model = step.model
         if is_worker_step and effective_model is None:
             effective_model = get_worker_default_model(step.tool_or_worker)
@@ -383,11 +327,6 @@ class DirectorInstance:
                 )
             else:
                 def make_call(model: Optional[str]) -> Callable[[], Dict[str, Any]]:
-                    # A fresh dict per call -- never mutate resolved_input
-                    # itself, since make_call may be invoked twice (primary,
-                    # then fallback) and each call must carry its own model
-                    # without the second overwriting context the first one
-                    # still needs if something inspects it after the fact.
                     step_input = {**resolved_input, "model": model}
                     return lambda: dispatch_fn(step_input)
 
@@ -406,4 +345,22 @@ class DirectorInstance:
         elapsed = time.monotonic() - t0
         with _LOG_LOCK:
             print(f"  [{ts()}] ✓ {step.id} {label}  ({elapsed:.1f}s)")
+
+        if is_worker_step:
+            worker_def = WORKERS_BY_NAME.get(step.tool_or_worker, {})
+            if worker_def.get("memory_critical", False):
+                event_fields = worker_def.get("memory_event_fields", [])
+                event = {
+                    "tipo":    "memory_critical",
+                    "worker":  step.tool_or_worker,
+                    "project": step.input.get("project", ""),
+                    "branch":  self._projects.get(
+                        step.input.get("project", ""), {}
+                    ).get("branch", "main"),
+                }
+                for field in event_fields:
+                    if field not in ("project", "branch") and field in result:
+                        event[field] = result[field]
+                _wal.append(event)
+
         return result

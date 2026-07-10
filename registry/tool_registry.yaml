@@ -5,28 +5,28 @@ tools:
       actions:
         - name: "read"
           required_input_keys:
-            - path   # absolute path to the file to read
+            - path
           output_keys:
-            - content   # full text content of the file
+            - content
           implicit_assumes:
             - op: FILE_EXISTS
               path: input.path
 
         - name: "write"
           required_input_keys:
-            - path     # absolute path to the file to write
-            - content  # full text content to write -- pass "$<prior_step>.<content_key>" here
+            - path
+            - content
           output_keys:
-            - bytes_written  # int, number of bytes written
+            - bytes_written
           implicit_assumes:
             - op: DIR_EXISTS
-              path: input.path  # Comparador extrae el directorio padre con Path(path).parent
+              path: input.path
 
         - name: "list"
           required_input_keys:
-            - path   # absolute path to the directory to list
+            - path
           output_keys:
-            - entries  # list of filenames in the directory
+            - entries
           implicit_assumes:
             - op: DIR_EXISTS
               path: input.path
@@ -37,12 +37,12 @@ tools:
       actions:
         - name: "run"
           required_input_keys:
-            - command  # the shell command to run as a string -- do NOT chain with &&, use separate steps
-            - args     # list of string arguments to pass to the command
+            - command
+            - args
           output_keys:
-            - stdout    # full standard output as string
-            - stderr    # full standard error as string
-            - exit_code # int, 0 means success
+            - stdout
+            - stderr
+            - exit_code
           implicit_assumes:
             - op: COMMAND_EXISTS
               command: input.command
@@ -53,19 +53,19 @@ tools:
       actions:
         - name: "status"
           required_input_keys:
-            - path   # absolute path to the git repository root
+            - path
           output_keys:
-            - status  # git status output as string
+            - status
           implicit_assumes:
             - op: IS_GIT_REPO
               path: input.path
 
         - name: "commit"
           required_input_keys:
-            - path     # absolute path to the git repository root
-            - message  # the commit message string -- pass "$<commit_msg_step>.message" here
+            - path
+            - message
           output_keys:
-            - sha  # the commit SHA string
+            - sha
           implicit_assumes:
             - op: IS_GIT_REPO
               path: input.path
@@ -76,11 +76,11 @@ tools:
       actions:
         - name: "show_diff"
           required_input_keys:
-            - file_path        # absolute path to the file being modified -- must already exist
-            - proposed_content # the full new content to propose -- pass "$<prior_step>.<content_key>" here
+            - file_path
+            - proposed_content
           output_keys:
-            - decision  # always "accepted" -- if rejected, plan is ABORTED before this step returns
-            - applied   # always True -- the file has been written to disk
+            - decision
+            - applied
           implicit_assumes:
             - op: FILE_EXISTS
               path: input.file_path
@@ -89,22 +89,19 @@ tools:
               port: 3333
 
 workers:
-    # --- CODING domain ---
     - name: "worker_ts_check"
       description: "Runs tsc and returns structured compiler output. No LLM."
       module: "workers.coding.worker_ts_check"
       requires_model: false
       required_input_keys:
         - project
-        - file_path  # (optional) path to a specific file -- if provided, only errors for that file are returned. Relative to project root or absolute.
+        - file_path
       output_keys:
-        - errors        # list of error dicts: {file, line, column, code, message} -- pass "$<this_step>.errors" to worker_ts_fix
-        - error_count   # int, always len(errors)
+        - errors
+        - error_count
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
-        # FILE_EXISTS solo si file_path está presente en el input del step concreto.
-        # El Comparador lo evalúa condicionalmente: si input contiene "file_path" → FILE_EXISTS(input.file_path)
         - op: FILE_EXISTS_IF_PRESENT
           path: input.file_path
 
@@ -113,21 +110,25 @@ workers:
       module: "workers.coding.worker_ts_fix"
       requires_model: true
       default_model: "z-ai/glm-5.2"
+      memory_critical: true
+      memory_event_fields:
+        - errors_resolved
+        - changes_made
+        - project
+        - branch
       required_input_keys:
         - project
-        - file_content  # full text of the file to fix -- read with filesystem.read first, then pass "$<read_step>.content"
-        - errors        # list of error dicts from a prior worker_ts_check step -- pass "$<check_step>.errors"
+        - file_content
+        - errors
       output_keys:
-        - fixed_content  # the complete corrected file -- pass "$<this_step>.fixed_content" to filesystem.write
-        - changes_made   # list of short descriptions of each change applied
+        - fixed_content
+        - changes_made
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
-        # FILE_UNCHANGED solo si file_content referencia un filesystem.read.
-        # Si referencia un worker_* (e.g. $s3.fixed_content), se omite silenciosamente.
         - op: FILE_UNCHANGED
-          ref_step: input.file_content   # resuelve "$s1.content" → step s1
-          ref_field: content             # campo del result de s1 que contiene el texto
+          ref_step: input.file_content
+          ref_field: content
 
     - name: "worker_jsdoc"
       description: "Adds JSDoc to exported symbols. Never touches logic."
@@ -136,14 +137,13 @@ workers:
       default_model: "z-ai/glm-5.2"
       required_input_keys:
         - project
-        - file_content  # full text of the file to document -- read with filesystem.read first, then pass "$<read_step>.content"
+        - file_content
       output_keys:
-        - documented_content  # the complete file with JSDoc added -- pass "$<this_step>.documented_content" to filesystem.write
-        - symbols_documented  # list of symbol names that received JSDoc
+        - documented_content
+        - symbols_documented
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
-        # FILE_UNCHANGED omitido si file_content viene de un worker_* -- ver regla del Comparador
         - op: FILE_UNCHANGED
           ref_step: input.file_content
           ref_field: content
@@ -153,16 +153,21 @@ workers:
       module: "workers.coding.worker_commit_msg"
       requires_model: true
       default_model: "z-ai/glm-5.2"
+      memory_critical: true
+      memory_event_fields:
+        - message
+        - project
+        - branch
       required_input_keys:
         - project
-        - diff  # full git diff text -- run "git diff" with terminal.run first, then pass "$<terminal_step>.stdout"
+        - diff
       output_keys:
-        - message  # the conventional commit message string
+        - message
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
         - op: NOT_EMPTY
-          ref_step: input.diff   # resuelve "$s1.stdout" → step s1
+          ref_step: input.diff
           ref_field: stdout
 
     - name: "worker_diff_summary"
@@ -172,9 +177,9 @@ workers:
       default_model: "z-ai/glm-5.2"
       required_input_keys:
         - project
-        - diff  # full git diff text -- run "git diff" with terminal.run first, then pass "$<terminal_step>.stdout"
+        - diff
       output_keys:
-        - summary  # plain-language prose summary of the diff
+        - summary
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
@@ -189,9 +194,9 @@ workers:
       default_model: "z-ai/glm-5.2"
       required_input_keys:
         - project
-        - file_content  # full text of the file to review -- read with filesystem.read first, then pass "$<read_step>.content"
+        - file_content
       output_keys:
-        - issues  # list of issue dicts: {severity, line, message}
+        - issues
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
@@ -204,13 +209,18 @@ workers:
       module: "workers.coding.worker_refactor"
       requires_model: true
       default_model: "z-ai/glm-5.2"
+      memory_critical: true
+      memory_event_fields:
+        - changes_made
+        - project
+        - branch
       required_input_keys:
         - project
-        - file_content  # full text of the file to refactor -- read with filesystem.read first, then pass "$<read_step>.content"
-        - pattern       # the specific refactor pattern to apply (e.g. "extract function", "rename variable")
+        - file_content
+        - pattern
       output_keys:
-        - refactored_content  # the complete refactored file -- pass "$<this_step>.refactored_content" to filesystem.write
-        - changes_made        # list of short descriptions of each change applied
+        - refactored_content
+        - changes_made
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
@@ -225,27 +235,16 @@ workers:
       default_model: "z-ai/glm-5.2"
       required_input_keys:
         - project
-        - file_content  # full text of the file to write tests for -- read with filesystem.read first, then pass "$<read_step>.content"
+        - file_content
       output_keys:
-        - test_content  # the complete test file content -- pass "$<this_step>.test_content" to filesystem.write
-        - test_count    # int, model's self-reported count of test cases written
+        - test_content
+        - test_count
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
         - op: FILE_UNCHANGED
           ref_step: input.file_content
           ref_field: content
-
-    # - name: "worker_test_runner"
-    #   description: "Runs tests and returns structured results. No LLM."
-    #   module: "workers.coding.worker_test_runner"
-    #   requires_model: false
-    #   required_input_keys:
-    #     - project
-    #   output_keys:
-    #     - passed   # int
-    #     - failed   # int
-    #     - output   # full test runner output as string
 
     - name: "worker_build"
       description: "Runs the build and returns structured output. No LLM."
@@ -254,9 +253,9 @@ workers:
       required_input_keys:
         - project
       output_keys:
-        - success     # bool
-        - exit_code   # int
-        - output      # full build output as string
+        - success
+        - exit_code
+        - output
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
@@ -268,13 +267,12 @@ workers:
       required_input_keys:
         - project
       output_keys:
-        - outdated         # list of outdated dependency dicts
-        - vulnerabilities  # list of vulnerability dicts
+        - outdated
+        - vulnerabilities
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
 
-    # --- QA domain ---
     - name: "worker_qa_consolidate"
       description: "Merges multiple proposed versions of the same file into one."
       module: "workers.qa.worker_qa_consolidate"
@@ -282,25 +280,24 @@ workers:
       default_model: "z-ai/glm-5.2"
       required_input_keys:
         - project
-        - versions  # list of file content strings to merge
+        - versions
       output_keys:
-        - merged_content  # the complete merged file -- pass "$<this_step>.merged_content" to filesystem.write
+        - merged_content
       implicit_assumes:
         - op: DIR_EXISTS
           path: project.path
 
-    # --- ENVIRONMENT domain ---
     - name: "worker_env_snapshot"
       description: "Fetches VSCode editor state via the local HTTP extension. No LLM."
       module: "workers.environment.worker_env_snapshot"
       requires_model: false
       required_input_keys: []
       output_keys:
-        - active_file    # absolute path of the currently active file in VSCode
-        - project        # detected project name
-        - branch         # current git branch
-        - open_tabs      # list of open file paths
-        - language       # language of the active file
+        - active_file
+        - project
+        - branch
+        - open_tabs
+        - language
       implicit_assumes:
         - op: SERVICE_REACHABLE
           host: localhost

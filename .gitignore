@@ -15,3 +15,10 @@ commits/*
 */node_modules/
 */out/*
 */nova-vscode*
+
+
+# Nova memory — runtime, nunca al repo
+memory/sqlite/sessions_dev.db
+memory/sqlite/sessions_dev.db-wal
+memory/sqlite/sessions_dev.db-shm
+memory/wal/nova_wal.jsonl

@@ -40,8 +40,9 @@ class SQLiteWriter:
         session_id: str,
         input_text: str,
         output_text: Optional[str] = None,
+        turn_id_override: Optional[str] = None,
     ) -> str:
-        turn_id = str(uuid.uuid4())
+        turn_id = turn_id_override or str(uuid.uuid4())
         self._conn.execute(
             "INSERT INTO turns (id, session_id, input_text, output_text, ts) VALUES (?, ?, ?, ?, ?)",
             (turn_id, session_id, input_text, output_text, int(time.time())),

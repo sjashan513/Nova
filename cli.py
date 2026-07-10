@@ -37,6 +37,7 @@ from core.domain.exceptions import (
     AssumesFailedError,
 )
 from memory.wal.wal_reader import WALReader
+from memory.bibliotecario import bibliotecario
 
 # Values del contexto truncados a este límite -- suficiente para ver
 # qué devolvió cada step sin que el terminal explote con el contenido
@@ -205,6 +206,9 @@ def main():
     print("Nova CLI v1.0 - Initialized (Phase 5: Comparador activo)")
     print("Type 'exit' or 'quit' to terminate.")
     _recover_wal()
+    processed = bibliotecario.run()
+    if processed:
+        print(f"[Bibliotecario] {processed} evento(s) escritos en SQLite.")
     iniciador = Iniciador()
 
     # Cargamos registry y projects una sola vez al arrancar -- son

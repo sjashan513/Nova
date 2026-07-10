@@ -167,6 +167,7 @@ class WorkerTsFix(BaseWorker):
         current_errors = errors
         current_content = file_content
         last_reason = None
+        all_changes_made = []
 
         for attempt in range(1 + _MAX_RETRIES):
             print(
@@ -200,6 +201,8 @@ class WorkerTsFix(BaseWorker):
                 }
 
             remaining_errors = []
+            all_changes_made.extend(parsed["changes_made"])
+
             if abs_file and os.path.exists(abs_file):
                 try:
                     with open(abs_file, "w", encoding="utf-8") as f:
@@ -244,7 +247,7 @@ class WorkerTsFix(BaseWorker):
                     "status": "success",
                     "result": {
                         "fixed_content": parsed["fixed_content"],
-                        "changes_made": parsed["changes_made"],
+                        "changes_made": all_changes_made,
                     },
                     "reason": None,
                 }

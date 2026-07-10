@@ -67,8 +67,9 @@ Pipeline, per run():
 
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from core.domain.models import Plan, Step
@@ -132,7 +133,10 @@ class DirectorInstance:
         projects: Optional[Dict] = None,
     ):
         self.plan = plan
-        self.plan_id = plan_id
+        self.plan_id = plan_id or str(uuid.uuid4())
+        self.turn_id = str(uuid.uuid4())
+        self.session_id = date.today().isoformat()
+        self.task = plan.objective
         self.context: Dict[str, Dict[str, Any]] = {}
         self.status: PlanStatus = "PENDING"
         self._registry: Dict = registry or {}
@@ -351,10 +355,14 @@ class DirectorInstance:
             if worker_def.get("memory_critical", False):
                 event_fields = worker_def.get("memory_event_fields", [])
                 event = {
-                    "tipo":    "memory_critical",
-                    "worker":  step.tool_or_worker,
-                    "project": step.input.get("project", ""),
-                    "branch":  self._projects.get(
+                    "tipo":       "memory_critical",
+                    "session_id": self.session_id,
+                    "turn_id":    self.turn_id,
+                    "plan_id":    self.plan_id,
+                    "task":       self.task,
+                    "worker":     step.tool_or_worker,
+                    "project":    step.input.get("project", ""),
+                    "branch":     self._projects.get(
                         step.input.get("project", ""), {}
                     ).get("branch", "main"),
                 }

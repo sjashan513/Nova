@@ -174,7 +174,7 @@ def parse_json_response(raw: str, required_keys: List[str]) -> Dict[str, Any]:
     text = _strip_markdown_fence(raw)
 
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(text, strict=False)
     except json.JSONDecodeError as e:
         raise ValueError(
             f"Response is not valid JSON: {e}. Raw response: {raw!r}"

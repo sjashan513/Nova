@@ -33,12 +33,10 @@ from workers.base import BaseWorker, WorkerOutput
 
 _DEFAULT_TEMPERATURE = 0.1
 
-# Same real failure observed with worker_jsdoc/worker_test_writer: a
-# larger file means more generation time, regardless of which Worker
-# is doing the generating -- this Worker also returns the COMPLETE
-# file content, same shape of risk.
 _DEFAULT_TIMEOUT_SECONDS = 180
 _DEFAULT_MAX_TOKENS = 16384
+
+_MAX_RETRIES = 2
 
 _SYSTEM_PROMPT = """You are a TypeScript error-fixing assistant. You receive a file's \
 full content and a list of specific compiler errors. Your job is to \
@@ -46,6 +44,10 @@ fix ONLY those errors, with the smallest possible change to make each \
 one go away -- never refactor, rename, reformat, or otherwise change \
 anything beyond what is strictly necessary to resolve the listed \
 errors.
+
+IMPORTANT: fixing one error must never introduce new ones. Before \
+returning, mentally verify that each change you made resolves its \
+target error without affecting any other line or symbol in the file.
 
 Respond with ONLY valid JSON, no prose, no markdown code fences, in \
 exactly this shape:
@@ -148,118 +150,117 @@ class WorkerTsFix(BaseWorker):
         timeout: float = input.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
         max_tokens: int = input.get("max_tokens", _DEFAULT_MAX_TOKENS)
 
-        try:
-            raw = call_nim(
-                model=model,
-                system_prompt=_SYSTEM_PROMPT,
-                user_content=_build_user_content(file_content, errors),
-                temperature=temperature,
-                timeout=timeout,
-                max_tokens=max_tokens,
-            )
-        except (RuntimeError, requests.exceptions.RequestException, KeyError, IndexError) as e:
-            # Known failure modes call_nim itself documents (missing
-            # API key, network/HTTP failure, malformed response shape)
-            # -- caught here specifically, not via a blanket
-            # `except Exception`, so a real bug in this Worker's own
-            # code is never silently swallowed as "the model failed."
-            return {
-                "status": "error",
-                "result": None,
-                "reason": f"Model call failed: {type(e).__name__}: {e}",
-            }
-
-        try:
-            parsed = parse_json_response(
-                raw, required_keys=["fixed_content", "changes_made"]
-            )
-        except ValueError as e:
-            return {
-                "status": "error",
-                "result": None,
-                "reason": str(e),
-            }
-
-        # Self-verify: write fixed content to the original file path
-        # temporarily and run tsc to confirm 0 errors remain.
-        # WorkerTsCheck runs tsc on the whole project -- we do the same
-        # here by temporarily writing the fix and restoring on failure.
-        # This is deterministic (no LLM), same subprocess tsc call.
         import os
         import subprocess
-        import shutil
+        import re as _re
+
         original_content = input.get("file_content", "")
-        # Resolve the actual file path from the errors list (first error's file)
         error_list = input.get("errors", [])
         rel_file = error_list[0].get("file") if error_list else None
         abs_file = os.path.join(project_path, rel_file) if rel_file else None
 
-        remaining_errors = []
-        if abs_file and os.path.exists(abs_file):
-            try:
-                # Write fix temporarily
-                with open(abs_file, "w", encoding="utf-8") as f:
-                    f.write(parsed["fixed_content"])
+        pattern = _re.compile(
+            r"^(?P<file>.+?)\((?P<line>\d+),(?P<column>\d+)\): "
+            r"error (?P<code>TS\d+): (?P<message>.+)$"
+        )
 
-                result = subprocess.run(
-                    ["npx", "tsc", "--noEmit", "--pretty", "false"],
-                    cwd=project_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
+        current_errors = errors
+        current_content = file_content
+        last_reason = None
+
+        for attempt in range(1 + _MAX_RETRIES):
+            print(
+                f"  [worker_ts_fix] intento {attempt + 1}/{1 + _MAX_RETRIES}")
+            try:
+                raw = call_nim(
+                    model=model,
+                    system_prompt=_SYSTEM_PROMPT,
+                    user_content=_build_user_content(
+                        current_content, current_errors),
+                    temperature=temperature,
+                    timeout=timeout,
+                    max_tokens=max_tokens,
                 )
-                # Parse errors using the same pattern as WorkerTsCheck
-                import re as _re
-                pattern = _re.compile(
-                    r"^(?P<file>.+?)\((?P<line>\d+),(?P<column>\d+)\): "
-                    r"error (?P<code>TS\d+): (?P<message>.+)$"
+            except (RuntimeError, requests.exceptions.RequestException, KeyError, IndexError) as e:
+                return {
+                    "status": "error",
+                    "result": None,
+                    "reason": f"Model call failed: {type(e).__name__}: {e}",
+                }
+
+            try:
+                parsed = parse_json_response(
+                    raw, required_keys=["fixed_content", "changes_made"]
                 )
-                for line in result.stdout.splitlines():
-                    m = pattern.match(line.strip())
-                    if m:
-                        # Only count errors in the file we just fixed --
-                        # tsc compiles the whole project, so other files
-                        # with pre-existing errors (missing @types/jest,
-                        # broken imports, etc.) would poison the result
-                        # and make self-verify reject a perfectly correct fix.
-                        error_file = os.path.normpath(m.group("file"))
-                        target_file = os.path.normpath(abs_file)
-                        if error_file != target_file:
-                            continue
-                        remaining_errors.append({
-                            "file": m.group("file"),
-                            "line": int(m.group("line")),
-                            "column": int(m.group("column")),
-                            "code": m.group("code"),
-                            "message": m.group("message"),
-                        })
-            except Exception:
-                remaining_errors = []  # tsc failed to run -- don't block
-            finally:
-                # Restore original if errors remain
-                if remaining_errors:
+            except ValueError as e:
+                return {
+                    "status": "error",
+                    "result": None,
+                    "reason": str(e),
+                }
+
+            remaining_errors = []
+            if abs_file and os.path.exists(abs_file):
+                try:
+                    with open(abs_file, "w", encoding="utf-8") as f:
+                        f.write(parsed["fixed_content"])
+
+                    tsc_result = subprocess.run(
+                        ["npx", "tsc", "--noEmit", "--pretty", "false"],
+                        cwd=project_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                    for line in tsc_result.stdout.splitlines():
+                        m = pattern.match(line.strip())
+                        if m:
+                            error_file = os.path.normpath(
+                                os.path.join(project_path, m.group("file")))
+                            target_file = os.path.normpath(abs_file)
+                            if error_file != target_file:
+                                continue
+                            remaining_errors.append({
+                                "file": m.group("file"),
+                                "line": int(m.group("line")),
+                                "column": int(m.group("column")),
+                                "code": m.group("code"),
+                                "message": m.group("message"),
+                            })
+                except Exception:
+                    remaining_errors = []
+                finally:
                     with open(abs_file, "w", encoding="utf-8") as f:
                         f.write(original_content)
 
-        if remaining_errors:
-            return {
-                "status": "error",
-                "result": None,
-                "reason": (
-                    f"Fix applied but {len(remaining_errors)} TypeScript "
-                    f"error(s) remain after correction: "
-                    + "; ".join(
-                        f"[{e.get('code')}] line {e.get('line')}: {e.get('message')}"
-                        for e in remaining_errors[:3]
-                    )
-                ),
-            }
+                if remaining_errors:
+                    print(f"  [worker_ts_fix] errores residuales ({len(remaining_errors)}): " +
+                          ", ".join(f"[{e.get('code')}] L{e.get('line')}" for e in remaining_errors))
+                else:
+                    print(f"  [worker_ts_fix] self-verify OK")
+
+            if not remaining_errors:
+                return {
+                    "status": "success",
+                    "result": {
+                        "fixed_content": parsed["fixed_content"],
+                        "changes_made": parsed["changes_made"],
+                    },
+                    "reason": None,
+                }
+
+            last_reason = (
+                f"attempt {attempt + 1}: {len(remaining_errors)} error(s) remain: "
+                + "; ".join(
+                    f"[{e.get('code')}] line {e.get('line')}: {e.get('message')}"
+                    for e in remaining_errors[:3]
+                )
+            )
+            current_content = parsed["fixed_content"]
+            current_errors = remaining_errors
 
         return {
-            "status": "success",
-            "result": {
-                "fixed_content": parsed["fixed_content"],
-                "changes_made": parsed["changes_made"],
-            },
-            "reason": None,
+            "status": "error",
+            "result": None,
+            "reason": f"Could not fix all errors after {1 + _MAX_RETRIES} attempts. {last_reason}",
         }

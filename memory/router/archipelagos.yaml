@@ -12,6 +12,7 @@ archipelagos:
           - bibliotecario
           - registry
           - tool_registry
+          - glm
         path: /home/uzux/Desktop/nova
 
       - name: Pulse
@@ -25,6 +26,15 @@ archipelagos:
           - createeffect
           - batcher
         path: /home/uzux/Desktop/Pulse
+
+      - name: PulseSandbox
+        keywords:
+          - sandbox
+          - fixture
+          - prueba
+          - data_processor
+          - signal.ts
+        path: /home/uzux/Desktop/nova/test_fixtures/pulse_sandbox
 
   personal:
     description: "conversación general, preferencias, rutinas"

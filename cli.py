@@ -1,32 +1,22 @@
 """
-Nova CLI — Fase 4: Planner + Director conectados de punta a punta.
+Nova CLI — FM4: capa conversacional Qwen/Groq con memory_tool y nova_plan.
 
-Flujo completo:
-    Nova> "arregla signal.ts"
-      → Iniciador.get_plan()        (Kimi via NIM)
-      → _print_plan()               (muestra el plan al usuario)
-      → _confirm_execution()        (pregunta confirmación)
-      → DirectorInstance.run()      (ejecuta el plan real)
-      → _print_execution_result()   (muestra el contexto raw, truncado a 300 chars)
+Todo input pasa por Qwen primero. Qwen decide:
+  - Conversación directa → content sin tool_calls
+  - Necesita memoria     → tool_call: memory_tool
+  - Tarea ejecutable     → tool_call: nova_plan (+ content de confirmación)
+  - Cadena mixta         → memory_tool → nova_plan en rondas sucesivas
 
-Cambios respecto a Fase 3:
-  - Imports: DirectorInstance + RetriesExhaustedError añadidos.
-  - _confirm_execution(): nueva función, pregunta [s/n] antes de ejecutar.
-  - _execute_plan(): nueva función, instancia DirectorInstance y gestiona
-    RetriesExhaustedError (el único error nuevo que puede salir del Director
-    que el CLI no manejaba antes; PlanContractErrorGroup ya estaba).
-  - _print_execution_result(): nueva función, itera el contexto por step,
-    trunca cada value a 300 chars para que el terminal no explote con
-    contenido de ficheros TypeScript completos.
-  - _print_retries_exhausted(): nueva función, formatea RetriesExhaustedError
-    mostrando cada intento con su error original.
-  - main(): después de _print_plan, ahora llama _execute_plan si el usuario
-    confirma. Sin confirmación, el plan se descarta sin ejecutar nada.
-
-Nada más cambió. DirectorInstance, Iniciador, planner.py, models.py
-están sellados y no se tocan.
+El loop de tool_calls corre hasta MAX_TOOL_ROUNDS o hasta que Qwen
+no emita más tool_calls. nova_plan rompe el loop e invoca el Planner.
 """
 
+import json
+import re
+
+from core.init.nova_boot import boot
+from core.init.registry_loader import load_registries
+from core.init.nova_init_helper import build_context
 from core.planner.iniciador import Iniciador
 from core.director.director_instance import DirectorInstance
 from core.domain.exceptions import (
@@ -35,189 +25,152 @@ from core.domain.exceptions import (
     PlanContractError,
     RetriesExhaustedError,
     AssumesFailedError,
+    PlanAbortedError,
 )
-from memory.wal.wal_reader import WALReader
-from memory.bibliotecario import bibliotecario
+from core.llm.groq_client import call_groq
+from core.cli.output import (
+    print_plan,
+    print_clarification,
+    print_contract_error_group,
+    print_planner_error,
+    print_execution_result,
+    print_retries_exhausted,
+    print_assumes_failed,
+)
+from memory.tool.memory_tool import TOOLS, execute_memory
 
-# Values del contexto truncados a este límite -- suficiente para ver
-# qué devolvió cada step sin que el terminal explote con el contenido
-# completo de un fichero TypeScript de 500 líneas.
-_CONTEXT_VALUE_TRUNCATE = 300
-
-
-def _recover_wal() -> None:
-    r = WALReader()
-    pending = list(r.unprocessed())
-    if pending:
-        print(
-            f"[WAL] {len(pending)} evento(s) no procesado(s) detectado(s) al arrancar:")
-        for e in pending:
-            print(f"  - {e['worker']} / {e['project']} / ts={e['ts']}")
+_MAX_TOOL_ROUNDS = 5
 
 
-def _print_plan(plan) -> None:
-    print(f"\nObjective: {plan.objective}")
-    print(f"Steps ({len(plan.steps)}):")
-    for step in plan.steps:
-        print(f"  [{step.id}] {step.tool_or_worker} -- {step.description}")
-        if step.assumes:
-            print(f"      assumes: {', '.join(step.assumes)}")
-
-
-def _print_clarification(questions) -> None:
-    print("\nNova needs clarification before planning this task:")
-    for i, q in enumerate(questions, start=1):
-        print(f"  {i}. {q}")
-
-
-def _print_contract_error_group(e: PlanContractErrorGroup) -> None:
-    print(
-        f"\n[PlanContractErrorGroup] Could not produce a valid plan after "
-        f"retrying with Kimi. {len(e.errors)} unresolved error(s):"
-    )
-    for err in e.errors:
-        print(
-            f"  - [{type(err).__name__}] step '{err.step_id}': '{err.raw_value}'")
-
-
-def _print_planner_error(e: PlannerError) -> None:
-    print(f"\n[{type(e).__name__}] {e}")
-    if e.raw_response:
-        print(f"  raw_response: {e.raw_response!r}")
+def _strip_markdown(text: str) -> str:
+    """
+    Elimina markdown del output antes de imprimirlo o enviarlo a TTS.
+    Determinístico — no depende de que el modelo cumpla las instrucciones.
+    """
+    # Negritas y cursivas: **texto**, *texto*, __texto__, _texto_
+    text = re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', text)
+    text = re.sub(r'_{1,2}([^_]+)_{1,2}', r'\1', text)
+    # Backticks inline y bloques de código
+    text = re.sub(r'```[\w]*\n?', '', text)
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Encabezados
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Listas numeradas: "1. foo" → "foo"
+    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+    # Listas con viñetas: "- foo", "* foo", "+ foo"
+    text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
+    # Líneas horizontales
+    text = re.sub(r'^[-*_]{3,}$', '', text, flags=re.MULTILINE)
+    # Múltiples líneas vacías → una sola
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 def _confirm_execution() -> bool:
-    """
-    Pregunta confirmación antes de ejecutar el plan. Cualquier respuesta
-    que no sea "s" (case-insensitive) descarta la ejecución sin tocar
-    nada. Esto es el human-in-the-loop mínimo de Fase 4 -- en Fase 5
-    (diff gate) el punto de confirmación se mueve al nivel del Step
-    crítico, pero para el CLI de texto de esta fase, una confirmación
-    por plan es suficiente.
-    """
     try:
         answer = input("\n¿Ejecutar este plan? [s/n]: ").strip().lower()
         return answer == "s"
     except (EOFError, KeyboardInterrupt):
-        # EOF en entornos no interactivos, o Ctrl+C durante la pregunta
-        # -- tratar como "no" en ambos casos, nunca ejecutar por defecto.
         return False
 
 
-def _print_execution_result(result: dict) -> None:
-    """
-    Imprime el contexto raw del Director, step por step, truncando cada
-    value a _CONTEXT_VALUE_TRUNCATE chars. El contexto es un dict plano
-    {step_id: {key: value}} donde cada value puede ser un str (contenido
-    de fichero, stdout), un int (exit_code, bytes_written), o una lista
-    (entries de directorio, args).
-
-    repr() en lugar de str() para que los strings muestren sus comillas
-    y los None/int se distingan visualmente de strings vacíos -- útil
-    para debugging.
-    """
-    print(
-        f"\n[DONE] Plan ejecutado. {len(result['context'])} step(s) completados.")
-    print("\nContexto por step:")
-    for step_id, output in result["context"].items():
-        print(f"  [{step_id}]:")
-        if not output:
-            print("    (sin output)")
-            continue
-        for key, value in output.items():
-            raw = repr(value)
-            truncated = raw[:_CONTEXT_VALUE_TRUNCATE]
-            suffix = "..." if len(raw) > _CONTEXT_VALUE_TRUNCATE else ""
-            print(f"    {key}: {truncated}{suffix}")
-
-
-def _print_retries_exhausted(e: RetriesExhaustedError) -> None:
-    """
-    Formatea RetriesExhaustedError mostrando cada intento con su error
-    original. En el caso de WorkerExecutionError (short-circuit de Nivel 1),
-    e.attempts tiene exactamente un elemento -- esto es correcto y esperado,
-    no un bug (ver error_policy.py::execute_with_retry).
-    """
-    print(f"\n[RetriesExhaustedError] Step '{e.step_id}' falló tras "
-          f"{len(e.attempts)} intento(s):")
-    for attempt in e.attempts:
-        print(f"  intento {attempt.attempt}: {type(attempt.original_error).__name__}: "
-              f"{attempt.original_error}")
-
-
-def _print_assumes_failed(e: AssumesFailedError) -> None:
-    """
-    Formatea AssumesFailedError mostrando qué precondición falló y por qué.
-    PAUSED ≠ FAILED: nada se rompió, el mundo cambió desde la planificación.
-    El usuario decide si reintentar (tras corregir la precondición), saltar
-    el step, o abortar el plan completo.
-    """
-    print(
-        f"\n[PAUSED] El plan se pausó antes de ejecutar el step '{e.step_id}'.")
-    print(f"  La(s) siguiente(s) precondición(es) no se cumplieron:\n")
-    for f in e.failures:
-        print(f"  [{f.op}] {f.reason}")
-    print(f"\n  El plan fue generado contra un estado del mundo que ya no es válido.")
-    print(f"  Opciones: corrige la precondición y reintenta la tarea, o cancela.")
-
-
 def _execute_plan(plan, registry: dict, projects: dict) -> None:
-    """
-    Instancia un DirectorInstance fresco para este plan y lo ejecuta.
-    Un DirectorInstance por plan, nunca reutilizado -- ver
-    director_instance.py's module docstring ("Una instancia, un Plan").
-
-    Fase 5: recibe registry y projects para pasárselos al Director, que
-    los inyecta en el Comparador antes de cada dispatch. Sin ellos el
-    Comparador es un no-op (backwards compat con tests existentes).
-
-    Errores manejados aquí:
-      - AssumesFailedError: una precondición implícita falló antes de
-        ejecutar un step. El plan quedó PAUSED. Nada se intentó, nada
-        se rompió -- el mundo cambió desde la planificación.
-      - RetriesExhaustedError: un step agotó su presupuesto de reintentos
-        (Nivel 1 + Nivel 2 si había fallback_model). El plan quedó FAILED.
-      - PlanAbortedError: Jashan rechazó un diff. El plan quedó ABORTED.
-      - PlanContractErrorGroup: el DAG o las referencias de input son
-        inválidas -- safety net, no debería ocurrir si el Iniciador hizo
-        su trabajo.
-
-    Cualquier otra excepción no capturada aquí sube al handler genérico
-    del main loop (Exception) -- no se silencia nada.
-    """
-    from core.domain.exceptions import PlanAbortedError
     director = DirectorInstance(plan, registry=registry, projects=projects)
     try:
         result = director.run()
-        _print_execution_result(result)
+        print_execution_result(result)
     except AssumesFailedError as e:
-        _print_assumes_failed(e)
+        print_assumes_failed(e)
     except RetriesExhaustedError as e:
-        _print_retries_exhausted(e)
+        print_retries_exhausted(e)
     except PlanAbortedError as e:
         print(f"\n[ABORTED] Diff rechazado. El plan fue cancelado. {e}")
     except PlanContractErrorGroup as e:
         print(f"\n[PlanContractErrorGroup] El Director rechazó el plan "
               f"antes de ejecutar nada. {len(e.errors)} error(s):")
-        _print_contract_error_group(e)
+        print_contract_error_group(e)
+
+
+def _handle_nova_plan(task: str, iniciador: Iniciador, registry: dict, projects: dict) -> None:
+    try:
+        response = iniciador.get_plan(task)
+    except PlanContractErrorGroup as e:
+        print_contract_error_group(e)
+        return
+    except PlannerError as e:
+        print_planner_error(e)
+        return
+    except PlanContractError as e:
+        print(f"\n[{type(e).__name__}] {e}")
+        return
+
+    if response["status"] == "clarification_needed":
+        print_clarification(response["questions"])
+        return
+
+    print_plan(response["plan"])
+
+    if _confirm_execution():
+        _execute_plan(response["plan"], registry=registry, projects=projects)
+    else:
+        print("Ejecución cancelada.")
+
+
+def _chat(user_input: str, ctx, iniciador: Iniciador, registry: dict, projects: dict) -> None:
+    ctx.add_user(user_input)
+
+    for round_n in range(_MAX_TOOL_ROUNDS):
+        message = call_groq(ctx.messages, tools=TOOLS)
+        ctx.add_assistant(message)
+
+        content = message.get("content") or ""
+        tool_calls = message.get("tool_calls")
+
+        print(
+            f"[DEBUG] round {round_n + 1} — tools: {[tc['function']['name'] for tc in tool_calls] if tool_calls else None}")
+
+        if content:
+            print(f"\nNova: {_strip_markdown(content)}")
+        elif not tool_calls:
+            print("\nNova: (sin respuesta)")
+
+        if not tool_calls:
+            break
+
+        nova_plan_call = None
+        memory_calls = []
+
+        for tc in tool_calls:
+            name = tc["function"]["name"]
+            if name == "nova_plan":
+                nova_plan_call = tc
+            else:
+                memory_calls.append(tc)
+
+        for tc in memory_calls:
+            args = json.loads(tc["function"]["arguments"])
+            result = execute_memory(
+                archipelago=args["archipelago"],
+                query=args["query"],
+            )
+            ctx.add_tool_result(tc["id"], result)
+
+        if nova_plan_call:
+            args = json.loads(nova_plan_call["function"]["arguments"])
+            ctx.add_tool_result(
+                nova_plan_call["id"], "Tarea recibida. Arrancando Planner.")
+            _handle_nova_plan(args["task"], iniciador, registry, projects)
+            break
 
 
 def main():
-    print("Nova CLI v1.0 - Initialized (Phase 5: Comparador activo)")
+    print("Nova CLI v1.0 - FM4 online")
     print("Type 'exit' or 'quit' to terminate.")
-    _recover_wal()
-    processed = bibliotecario.start()
-    if processed:
-        print(f"[Bibliotecario] {processed} evento(s) escritos en SQLite.")
-    iniciador = Iniciador()
 
-    # Cargamos registry y projects una sola vez al arrancar -- son
-    # inmutables en runtime, no hay razón para recargarlos por plan.
-    import yaml
-    with open("registry/tool_registry.yaml", encoding="utf-8") as f:
-        registry = yaml.safe_load(f)
-    with open("registry/project_registry.yaml", encoding="utf-8") as f:
-        projects = yaml.safe_load(f) or {}
+    boot()
+    registry, projects = load_registries()
+    ctx = build_context()
+    iniciador = Iniciador()
 
     while True:
         try:
@@ -226,46 +179,18 @@ def main():
             if not user_input:
                 continue
 
-            command = user_input.lower()
-
-            if command in ['exit', 'quit']:
+            if user_input.lower() in ("exit", "quit"):
                 print("Shutting down systems. See you next time!")
                 break
 
-            if command == 'help':
-                print("Basic commands:")
-                print("  exit - Close the application")
-                print("  help - Show this message")
-                print("  [text] - Sends the task to the Planner (Kimi via NIM)")
+            if user_input.lower() == "help":
+                print("Commands:")
+                print("  exit / quit — cierra Nova")
+                print("  help        — este mensaje")
+                print("  [texto]     — habla con Nova")
                 continue
 
-            print(f"Planning: {user_input}")
-
-            try:
-                response = iniciador.get_plan(user_input)
-            except PlanContractErrorGroup as e:
-                _print_contract_error_group(e)
-                continue
-            except PlannerError as e:
-                _print_planner_error(e)
-                continue
-            except PlanContractError as e:
-                print(f"\n[{type(e).__name__}] {e}")
-                continue
-
-            if response["status"] == "clarification_needed":
-                _print_clarification(response["questions"])
-                continue
-
-            # status == "ready" -- mostrar el plan y pedir confirmación
-            # antes de tocar cualquier fichero o llamar a cualquier worker.
-            _print_plan(response["plan"])
-
-            if _confirm_execution():
-                _execute_plan(response["plan"],
-                              registry=registry, projects=projects)
-            else:
-                print("Ejecución cancelada.")
+            _chat(user_input, ctx, iniciador, registry, projects)
 
         except KeyboardInterrupt:
             print("\nForced shutdown detected. Closing...")

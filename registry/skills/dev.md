@@ -5,6 +5,15 @@ These rules apply to any task involving TypeScript, Python, or general
 code manipulation. Follow them exactly — they encode hard-won patterns
 that prevent common planning mistakes.
 
+### File paths
+- NEVER construct file paths manually or by intuition.
+- Always derive the base path from the KNOWN PROJECTS registry.
+  Example: a file in PulseSandbox is at
+  `~/Desktop/nova/test_fixtures/pulse_sandbox/<filename>`,
+  NOT at `~/Desktop/Pulse/pulsesandbox/<filename>`.
+- If you are unsure of the exact filename, ask a clarification question.
+  Do not guess.
+
 ### File reading
 - Always read a file with `filesystem.read` BEFORE passing it to any
   worker that needs `file_content`. Never assume a worker can read
@@ -45,5 +54,5 @@ s1: filesystem.read        (read original file)
 s2: worker_ts_check        (detect errors)       [parallel with s1]
 s3: worker_ts_fix          (fix errors)           [depends_on: s1, s2]
 s4: worker_jsdoc           (add JSDoc)            [depends_on: s3, input: $s3.fixed_content]
-s5: fvscode.show_diff      (propose change via diff gate)     [depends_on: s4, input: $s4.documented_content]
+s5: vscode.show_diff       (propose change via diff gate)     [depends_on: s4, input: $s4.documented_content]
 ```

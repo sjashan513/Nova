@@ -92,12 +92,12 @@ class MemoryRouter:
         }
 
     def _query_zep(self, session_id: str, query: str) -> List[dict]:
-        return self._zep.search(session_id=session_id, query=query, limit=5)
+        return [{"source": "zep", **r} for r in self._zep.search(session_id=session_id, query=query, limit=5)]
 
     def _query_codebase(self, island_name: Optional[str], query: str) -> List[dict]:
         if island_name is None:
             return []
-        return self._query_engine.search(island_name=island_name, query=query)
+        return [{"source": "codebase", **r} for r in self._query_engine.search(island_name=island_name, query=query)]
 
     def _query_both(
         self, session_id: str, island_name: Optional[str], query: str

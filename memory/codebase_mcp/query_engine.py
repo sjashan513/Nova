@@ -55,7 +55,9 @@ class QueryEngine:
             return []
 
         try:
-            if self._is_registry_query(q):
+            if self._is_file_query(q):
+                return self._query_files(conn, island_name, query)
+            elif self._is_registry_query(q):
                 return self._query_registry(conn, island_name, query)
             elif self._is_usage_query(q):
                 return self._query_usages(conn, island_name, query)
@@ -72,9 +74,14 @@ class QueryEngine:
     # Intent detection
     # ------------------------------------------------------------------
 
+    def _is_file_query(self, q: str) -> bool:
+        return bool(re.search(
+            r"\b(fichero|archivo|file)\b|\.ts\b|\.tsx\b|\.py\b|\.yaml\b", q
+        ))
+
     def _is_registry_query(self, q: str) -> bool:
         return bool(re.search(
-            r"\b(workers?|tools?|registry|schema|registered|registrado|existen|hay|disponibles?)\b", q
+            r"\b(workers?|tools?|registry|schema|registered|registrado|disponibles?)\b", q
         ))
 
     def _is_usage_query(self, q: str) -> bool:
@@ -186,6 +193,44 @@ class QueryEngine:
             }
             for r in rows
         ]
+
+    def _query_files(self, conn: sqlite3.Connection, island: str, query: str) -> List[dict]:
+        """
+        Returns files matching a filename extracted from the query.
+        e.g. "existe signal.ts" → busca 'signal.ts' en la tabla files.
+        """
+        keyword = self._extract_file_keyword(query)
+        if not keyword:
+            return []
+
+        rows = conn.execute(
+            """SELECT path, mtime FROM files
+               WHERE island = ? AND path LIKE ?
+               ORDER BY path""",
+            (island, f"%{keyword}%"),
+        ).fetchall()
+
+        return [
+            {
+                "source": "codebase",
+                "file": r["path"],
+                "line": 0,
+                "content": r["path"],
+                "exists": True,
+            }
+            for r in rows
+        ]
+
+    def _extract_file_keyword(self, query: str) -> str:
+        """
+        Extracts a filename (with or without extension) from the query.
+        e.g. "existe el fichero signal.ts" → "signal.ts"
+             "tienes indexado signal"       → "signal"
+        """
+        match = re.search(r"\b[\w\-]+\.(ts|tsx|py|yaml|yml|json|md)\b", query)
+        if match:
+            return match.group(0)
+        return ""
 
     # ------------------------------------------------------------------
     # Helpers

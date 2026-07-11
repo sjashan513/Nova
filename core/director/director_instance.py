@@ -91,9 +91,9 @@ from workers.coding.worker_test_writer import WorkerTestWriter
 from workers.coding.worker_commit_msg import WorkerCommitMsg
 from workers.coding.worker_diff_summary import WorkerDiffSummary
 from registry.worker_registry import get_worker_default_model, WORKERS_BY_NAME
-from memory.wal.wal_writer import WALWriter
+from memory.wal.wal_manager import WALManager
 
-_wal = WALWriter()
+_wal = WALManager()
 
 PlanStatus = Literal["PENDING", "RUNNING",
                      "DONE", "FAILED", "ABORTED", "PAUSED"]

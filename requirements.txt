@@ -2,3 +2,11 @@ pydantic
 pyyaml
 requests
 openai
+numpy
+
+# Memory layer — M2/M3
+zep-cloud
+sentence-transformers
+tree-sitter
+tree-sitter-python
+tree-sitter-typescript

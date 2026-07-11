@@ -206,7 +206,7 @@ def main():
     print("Nova CLI v1.0 - Initialized (Phase 5: Comparador activo)")
     print("Type 'exit' or 'quit' to terminate.")
     _recover_wal()
-    processed = bibliotecario.run()
+    processed = bibliotecario.start()
     if processed:
         print(f"[Bibliotecario] {processed} evento(s) escritos en SQLite.")
     iniciador = Iniciador()

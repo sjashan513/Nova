@@ -1,0 +1,31 @@
+archipelagos:
+  dev:
+    description: "proyectos de código, repositorios, decisiones técnicas"
+    islands:
+      - name: Nova
+        keywords:
+          - nova
+          - director
+          - planner
+          - worker
+          - comparador
+          - bibliotecario
+          - registry
+          - tool_registry
+        path: /home/uzux/Desktop/nova
+
+      - name: Pulse
+        keywords:
+          - pulse
+          - signal
+          - effect
+          - computed
+          - resumability
+          - createsignal
+          - createeffect
+          - batcher
+        path: /home/uzux/Desktop/Pulse
+
+  personal:
+    description: "conversación general, preferencias, rutinas"
+    islands: []    # futuro — fuera de scope MVP

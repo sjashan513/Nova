@@ -22,7 +22,7 @@ from core.llm.nim_client import parse_json_response
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "gpt-4o-mini"
+_MODEL = "gpt-5.4-nano"
 
 _SYSTEM_PROMPT = """\
 You are a memory extraction assistant for an AI development tool called Nova.
